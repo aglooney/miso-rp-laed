@@ -1,0 +1,42 @@
+param N_g := 2;
+param N_t := 3;
+param N_T := 12;
+param ramp_single := 1;
+param reserve_single := 1;
+param sigma := 0;
+
+param storage_capacity := 5;
+param storage_duration := 48;
+param storage_sinit := 240;
+param storage_pinit := 0;
+
+param Cost :=
+1 25
+2 30;
+
+param Capacity :=
+1 500
+2 500;
+
+param Ramp_lim :=
+1 500
+2 50;
+
+param Load :=
+1 400
+2 400
+3 300
+4 400
+5 500
+6 600
+7 700
+8 800
+9 900
+10 1000
+11 1000
+12 1000;
+
+
+param Gen_init :=
+1 0
+2 0;
