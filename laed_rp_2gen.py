@@ -4,33 +4,6 @@ import copy
 import matplotlib.pyplot as plt
 import json
 
-#system configs
-solver = SolverFactory('gurobi')
-load_factor = 1.0
-reserve_factor = 0
-ramp_factor = 0.1
-cost_load = 1e10
-cost_curtailed = 0
-case_name = 'toy_data.dat'
-data = DataPortal()
-data.load(filename=case_name)
-
-#load historical projection
-file_path = "MISO_Projection.json"
-with open(file_path) as f:
-    interp_data = json.load(f)
-ref_cap = 325
-aug_2032_ori = interp_data['2032_Aug']
-load_scale_2032 = ref_cap/(sum(aug_2032_ori.values) / len(aug_2032_ori))
-aug_2032 = {int(key): value * load_scale_2032 for key, value in aug_2032_ori.items()}
- 
-#define policy parameters
-data.data()["N_t"][None] = 13
-N_g = data.data()['N_g'][None]
-N_t = data.data()['N_t'][None]
-cost_init = data.data()['Cost']
-
-N_T = len(aug_2032_ori)
 
 def rped_opt_model():
     #define abstract model
@@ -366,3 +339,49 @@ def LAED_No_Errors(data, N_g, N_t, N_T, load_factor, ramp_factor):
         Curt_LAED[T0 - 1] = Curt_laed[0]
 
     return P_LAED, Shed_LAED, Curt_LAED, TLMP, LLMP, R_LAED, RP_LAED
+
+
+if __name__=="__main__":
+    #system configs
+    solver = SolverFactory('gurobi')
+    load_factor = 1.0
+    reserve_factor = 0
+    ramp_factor = 0.1
+    cost_load = 1e10
+    cost_curtailed = 0
+    case_name = 'toy_data.dat'
+    data = DataPortal()
+    data.load(filename=case_name)
+
+    #load historical projection
+    file_path = "MISO_Projection.json"
+    with open(file_path) as f:
+        interp_data = json.load(f)
+    ref_cap = 325
+    aug_2032_ori = interp_data['2032_Aug']
+    load_scale_2032 = ref_cap/(sum(aug_2032_ori.values) / len(aug_2032_ori))
+    aug_2032 = {int(key): value * load_scale_2032 for key, value in aug_2032_ori.items()}
+    
+    #define policy parameters
+    data.data()["N_t"][None] = 13
+    N_g = data.data()['N_g'][None]
+    N_t = data.data()['N_t'][None]
+    cost_init = data.data()['Cost']
+
+    N_T = len(aug_2032_ori)
+
+    data.data()["Load"] = aug_2032
+    Gen1_ini = np.min([data.data()['Capacity'][1],data.data()['Load'][1]])
+    data.data()['Gen_init'] = {1: Gen1_ini, 2: np.min([data.data()['Capacity'][2], data.data()['Load'][1]- Gen1_ini])}
+
+    data_laed = copy.deepcopy(data)
+    data_ed = copy.deepcopy(data)
+
+    P_LAED, Shed_LAED, Curt_LAED, TLMP, LLMP, R_LAED, RP_LAED = LAED_No_Errors(data_laed, N_g, N_t, N_T,load_factor, ramp_factor)
+    P_ED, Shed_ED, Curt_ED, LMP, R_ED, RP_ED, rup_ED, rupp_Ed, rdw_ED, rdwp_Ed = ED_no_errors(data_ed, N_g, N_t, N_T, load_factor, ramp_factor)
+
+    #compare results
+
+    print("Mean Demand:", ref_cap)
+    print("Load Shedding in LAED:", np.sum(Shed_LAED)/12)
+    print(f"Load Shedding in ED with {str(5*data.data()["N_t"][None]-1)} min ramp product: {np.sum(Shed_ED/12)}")
