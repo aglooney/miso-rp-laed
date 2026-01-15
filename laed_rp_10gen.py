@@ -63,7 +63,7 @@ def ed_rp_opt_model():
     def ramp_up_rule(model, g):
         return model.P[g] - model.Gen_init[g] <= model.Ramp_lim[g]
     model.ramp_up_constraint = Constraint(model.G, rule=ramp_up_rule)
-################################################################################
+#############################################################################################
     # Ramping Reserve constraints
     def rampup_reserve_rule(model):
         return sum(model.rampup[g, model.N_t] for g in model.G) >= (model.Load[model.N_t] - model.loadshed[model.N_t] + model.curtailed[model.N_t]) - (model.Load[1] - model.loadshed[1] + model.curtailed[1])
