@@ -1,8 +1,8 @@
 param N_g := 2;
 param N_t := 3;
 param N_T := 12;
-param Ramp_single := 1;
-param Reserve_single := 1;
+param ramp_single := 1;
+param reserve_single := 1;
 param sigma := 0;
 
 param storage_capacity := 5;
