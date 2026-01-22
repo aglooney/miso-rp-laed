@@ -412,7 +412,7 @@ if __name__=="__main__":
     ramp_factor = 0.1
     cost_load = 1e10
     cost_curtailed = 0
-    case_name = 'toy_data.dat'
+    case_name = '10GEN_MASKED.dat'
     data = DataPortal()
     data.load(filename=case_name)
 
@@ -420,7 +420,7 @@ if __name__=="__main__":
     with open(file_path, 'r') as f:
         interpolated_data = json.load(f)
 
-    ref_cap=325
+    ref_cap=2561
 
     Aug_2032_ori = interpolated_data['2032_Aug']
     load_scale_2032 = ref_cap/(sum(Aug_2032_ori.values())/len(Aug_2032_ori))
@@ -437,6 +437,9 @@ if __name__=="__main__":
 
         #define window size
         data.data()["N_t"][None] = int(i)
+
+        # #define window size
+        # data.data()["N_t"][None] = 12
         
         #define policy parameters
         N_g = data.data()['N_g'][None]
@@ -445,8 +448,52 @@ if __name__=="__main__":
         N_T = len(Aug_2032_ori)
         cost_init = data.data()['Cost']
 
-        Gen1_ini = np.min([data.data()['Capacity'][1],data.data()['Load'][1]])
-        data.data()['Gen_init'] = {1: Gen1_ini, 2: np.min([data.data()['Capacity'][2], data.data()['Load'][1]- Gen1_ini])}
+        if N_g != 2:
+            Load_ini = data.data()['Load'][1]
+            # Create an abstract model
+            model_ini = AbstractModel()
+            model_ini.N_g = Param(within=NonNegativeIntegers) # Number of Generators
+            model_ini.G = RangeSet(1, model_ini.N_g)  # Set of Generators
+            model_ini.Cost = Param(model_ini.G)
+            model_ini.Capacity = Param(model_ini.G)
+            model_ini.reserve_single = Param()
+            # Define variables
+            model_ini.P = Var(model_ini.G,  within=NonNegativeReals)
+            model_ini.Reserve = Var(model_ini.G, within=NonNegativeReals)
+
+            # Objective function: Minimize cost
+            def objective_rule(model):
+                return sum(model.Cost[g] * model.P[g] for g in model.G) 
+            model_ini.obj = Objective(rule=objective_rule, sense=minimize)
+
+            # Power balance constraints
+            def power_balance_rule(model):
+                return sum(model.P[g] for g in model.G) == Load_ini 
+            model_ini.power_balance_constraint = Constraint(rule=power_balance_rule)
+
+            # Capacity constraints
+            def capacity_rule(model,g):
+                return model.P[g] + model.Reserve[g] <= model.Capacity[g]
+            model_ini.capacity_constraint = Constraint(model_ini.G, rule=capacity_rule)
+
+            # Reserve constraints, total reserve is reserve_factor of the total load
+            def reserve_rule(model):
+                return sum(model.Reserve[g] for g in model.G) >= reserve_factor * Load_ini
+            model_ini.reserve_constraint = Constraint(rule=reserve_rule)
+
+            # Single Generator Reserve Bid
+            def reserve_single_rule(model, g):
+                return model.Reserve[g] <= model.reserve_single * model.Capacity[g]
+            model_ini.reserve_single_constraint = Constraint(model_ini.G,  rule=reserve_single_rule)
+
+            ed_ini = model_ini.create_instance(data)
+            solver.solve(ed_ini, tee=False)
+
+            data.data()['Gen_init'] = {g: ed_ini.P[g].value for g in ed_ini.G}
+
+        else:
+            Gen1_ini = np.min([data.data()['Capacity'][1],data.data()['Load'][1]])
+            data.data()['Gen_init'] = {1: Gen1_ini, 2: np.min([data.data()['Capacity'][2], data.data()['Load'][1]- Gen1_ini])}
 
         data_laed = copy.deepcopy(data)
         data_ed = copy.deepcopy(data)
@@ -457,13 +504,20 @@ if __name__=="__main__":
 
         laed_sheds.append(np.sum(Shed_LAED)/12)
         rp_sheds.append(np.sum(Shed_ED)/12)
+
     #compare results
 
+    diffs = [laed_sheds[i] - rp_sheds[i] for i in range(20)]
+    print(diffs)
+
     plt.figure()
-    plt.plot(nts, laed_sheds, label="LAED")
-    plt.plot(nts, rp_sheds, label="RP")
+    plt.scatter(nts, laed_sheds, label="LAED")
+    plt.scatter(nts, rp_sheds, label="RP")
+    plt.xlabel('Window Size')
+    plt.ylabel("Load Shedding")
     plt.legend()
     plt.show()
+
 
 
     # print('Mean Demand:', ref_cap)
@@ -476,9 +530,9 @@ if __name__=="__main__":
     # plt.plot(times, Shed_LAED, label="LAED Load Shedding")
     # plt.plot(times, Shed_ED, label="RP Load Shedding")
     # plt.plot(times, list(data.data()["Load"].values())[:len(times)], label="Load")
-    # plt.plot(times, P_ED[0], label="Gen 1 RP")
-    # plt.plot(times, P_ED[1], label="Gen 2 RP")
-    # plt.plot(times, P_LAED[0], label="Gen 1 LAED")
-    # plt.plot(times, P_LAED[1], label="Gen 2 LAED")
+    # # plt.plot(times, P_ED[0], label="Gen 1 RP")
+    # # plt.plot(times, P_ED[1], label="Gen 2 RP")
+    # # plt.plot(times, P_LAED[0], label="Gen 1 LAED")
+    # # plt.plot(times, P_LAED[1], label="Gen 2 LAED")
     # plt.legend()
     # plt.show()
