@@ -1,0 +1,66 @@
+param N_g := 2;
+param N_t := 3;
+param N_T := 12;
+param ramp_single := 1;
+param reserve_single := 1;
+param sigma := 0;
+
+param N_s := 1;
+param E_cap :=
+1 200;
+
+param P_ch_cap :=
+1 65;
+
+param P_dis_cap :=
+1 65;
+
+param SoC_init :=
+1 100;
+
+param SoC_min :=
+1 20;
+
+param SoC_max :=
+1 200;
+
+param charge_cost :=
+1 0;
+
+param discharge_cost :=
+1 0;
+
+param eta_c := 0.95;
+param eta_d := 0.95;
+param delta_t := 1;
+
+param Cost :=
+1 25
+2 30;
+
+param Capacity :=
+1 500
+2 500;
+
+param Ramp_lim :=
+1 500
+2 50;
+
+param Load :=
+1 400
+2 400
+3 300
+4 400
+5 500
+6 600
+7 700
+8 800
+9 900
+10 1000
+11 1000
+12 1000;
+
+
+param Gen_init :=
+1 0
+2 0;
