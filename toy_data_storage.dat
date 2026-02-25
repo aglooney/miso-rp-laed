@@ -7,7 +7,11 @@ param sigma := 0;
 
 param N_s := 1;
 param E_cap :=
+<<<<<<< HEAD
 1 260;
+=======
+1 200;
+>>>>>>> origin/main
 
 param P_ch_cap :=
 1 65;
@@ -16,10 +20,17 @@ param P_dis_cap :=
 1 65;
 
 param SoC_init :=
+<<<<<<< HEAD
 1 0;
 
 param SoC_min :=
 1 0;
+=======
+1 100;
+
+param SoC_min :=
+1 20;
+>>>>>>> origin/main
 
 param SoC_max :=
 1 200;
@@ -30,8 +41,13 @@ param charge_cost :=
 param discharge_cost :=
 1 0;
 
+<<<<<<< HEAD
 param eta_c := 1;
 param eta_d := 1;
+=======
+param eta_c := 0.95;
+param eta_d := 0.95;
+>>>>>>> origin/main
 param delta_t := 1;
 
 param Cost :=

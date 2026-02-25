@@ -543,6 +543,7 @@ if __name__=="__main__":
 
     data.data()["Load"] = Aug_2032
 
+<<<<<<< HEAD
     # nts = np.linspace(1, 19, 19)
     # laed_sheds = []
     # rp_sheds = []
@@ -680,6 +681,97 @@ if __name__=="__main__":
     # plt.xticks(nts.astype(int))
     # plt.legend()
     # plt.show()
+=======
+    nts = np.linspace(1, 19, 19)
+    laed_sheds = []
+    rp_sheds = []
+
+    for i in tqdm(range(1,20)):
+
+        #define window size
+        data.data()["N_t"][None] = int(i)
+
+    # # #define window size
+    # data.data()["N_t"][None] = 10
+    
+        #define policy parameters
+        N_g = data.data()['N_g'][None]
+        N_t = data.data()['N_t'][None]
+        N_T = data.data()["N_T"][None]
+        N_T = len(Aug_2032_ori)
+        cost_init = data.data()['Cost']
+
+        if N_g != 2:
+            Load_ini = data.data()['Load'][1]
+            # Create an abstract model
+            model_ini = AbstractModel()
+            model_ini.N_g = Param(within=NonNegativeIntegers) # Number of Generators
+            model_ini.G = RangeSet(1, model_ini.N_g)  # Set of Generators
+            model_ini.Cost = Param(model_ini.G)
+            model_ini.Capacity = Param(model_ini.G)
+            model_ini.reserve_single = Param()
+            # Define variables
+            model_ini.P = Var(model_ini.G,  within=NonNegativeReals)
+            model_ini.Reserve = Var(model_ini.G, within=NonNegativeReals)
+
+            # Objective function: Minimize cost
+            def objective_rule(model):
+                return sum(model.Cost[g] * model.P[g] for g in model.G) 
+            model_ini.obj = Objective(rule=objective_rule, sense=minimize)
+
+            # Power balance constraints
+            def power_balance_rule(model):
+                return sum(model.P[g] for g in model.G) == Load_ini 
+            model_ini.power_balance_constraint = Constraint(rule=power_balance_rule)
+
+            # Capacity constraints
+            def capacity_rule(model,g):
+                return model.P[g] + model.Reserve[g] <= model.Capacity[g]
+            model_ini.capacity_constraint = Constraint(model_ini.G, rule=capacity_rule)
+
+            # Reserve constraints, total reserve is reserve_factor of the total load
+            def reserve_rule(model):
+                return sum(model.Reserve[g] for g in model.G) >= reserve_factor * Load_ini
+            model_ini.reserve_constraint = Constraint(rule=reserve_rule)
+
+            # Single Generator Reserve Bid
+            def reserve_single_rule(model, g):
+                return model.Reserve[g] <= model.reserve_single * model.Capacity[g]
+            model_ini.reserve_single_constraint = Constraint(model_ini.G,  rule=reserve_single_rule)
+
+            ed_ini = model_ini.create_instance(data)
+            solver.solve(ed_ini, tee=False)
+
+            data.data()['Gen_init'] = {g: ed_ini.P[g].value for g in ed_ini.G}
+
+        else:
+            Gen1_ini = np.min([data.data()['Capacity'][1],data.data()['Load'][1]])
+            data.data()['Gen_init'] = {1: Gen1_ini, 2: np.min([data.data()['Capacity'][2], data.data()['Load'][1]- Gen1_ini])}
+
+        data_laed = copy.deepcopy(data)
+        data_ed = copy.deepcopy(data)
+            
+        P_ED, Shed_ED, LMP, TLMP, rup_ED, rupp_Ed, rdw_ED, rdwp_Ed = ED_with_error(data_ed, N_g, N_t, N_T, load_factor, ramp_factor, solver, sigma, rho, rng, error_type="student-t")
+        #P_LAED, Shed_LAED, Curt_LAED, TLMP, LLMP, R_LAED, RP_LAED = LAED_No_Errors(data_laed, N_g, N_t, N_T,load_factor, ramp_factor, solver)
+        P_LAED, Shed_LAED, TLMP, LLMP, R_LAED, RP_LAED = LAED_with_error(data_laed, N_g, N_t, N_T, load_factor, ramp_factor, solver, sigma, rho, rng, error_type="student-t")
+
+        laed_sheds.append(np.sum(Shed_LAED)/12)
+        rp_sheds.append(np.sum(Shed_ED)/12)
+
+    # #compare results
+
+    diffs = [laed_sheds[i] - rp_sheds[i] for i in range(len(laed_sheds))]
+    print(diffs)
+
+    plt.figure()
+    plt.plot(nts, laed_sheds, label="LAED")
+    plt.plot(nts, rp_sheds, label="RP")
+    plt.xlabel('Window Size')
+    plt.ylabel("Load Shedding")
+    plt.xticks(nts.astype(int))
+    plt.legend()
+    plt.show()
+>>>>>>> origin/main
 
 
 
@@ -698,4 +790,8 @@ if __name__=="__main__":
     # plt.plot(times, P_LAED[0], label="Gen 1 LAED")
     # plt.plot(times, P_LAED[1], label="Gen 2 LAED")
     # plt.legend()
+<<<<<<< HEAD
     # plt.show()
+=======
+    # plt.show()
+>>>>>>> origin/main
