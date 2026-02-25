@@ -92,7 +92,6 @@ def rped_opt_model():
 
     def objective_rule(m):
         gen_cost = sum(m.Cost[g] * m.P[g] for g in m.G)
-<<<<<<< HEAD
         # RP/ED is a single-interval energy dispatch + a ramp product over the look-ahead window.
         # Only the commit interval (t=1) is energy-dispatched. Treat t>1 storage variables
         # as capability endpoints for the ramp product, not paid energy.
@@ -100,17 +99,10 @@ def rped_opt_model():
         storage_cost = sum(
             m.charge_cost[s] * m.P_charge[s, 1] + m.discharge_cost[s] * m.P_discharge[s, 1]
             for s in m.S
-=======
-        shed_cost = cost_load * sum(m.Loadshed[t] for t in m.T)
-        storage_cost = (
-            sum(m.charge_cost[s] * m.P_charge[s, t] for s in m.S for t in m.T)
-            + sum(m.discharge_cost[s] * m.P_discharge[s, t] for s in m.S for t in m.T)
->>>>>>> origin/main
         )
         return gen_cost + shed_cost + storage_cost
     m.obj = Objective(rule=objective_rule, sense=minimize)
 
-<<<<<<< HEAD
     # Keep future shedding at 0 so the model can't relax ramp requirements by shedding
     # in non-committed intervals.
     def future_shed_zero_rule(m, t):
@@ -119,8 +111,6 @@ def rped_opt_model():
         return m.Loadshed[t] == 0.0
     m.future_shed_zero_constraint = Constraint(m.T, rule=future_shed_zero_rule)
 
-=======
->>>>>>> origin/main
     def capacity_up_rule(m, g, t):
         return m.P[g] + m.Rampup[g, t] <= m.Capacity[g]
     m.capacity_up_constraint = Constraint(m.G, m.T, rule=capacity_up_rule)
@@ -143,7 +133,6 @@ def rped_opt_model():
     m.ramp_up_constraint = Constraint(m.G, rule=ramp_up_rule)
 
     def rampup_window_rule(m, g, t):
-<<<<<<< HEAD
         # Only a single endpoint ramp product (at t = last).
         if t == 1:
             return m.Rampup[g, t] <= 0.0
@@ -159,13 +148,6 @@ def rped_opt_model():
         if t == m.T.last():
             return m.Rampdown[g, t] <= (t - 1) * m.ramp_single * m.Ramp_lim[g]
         return m.Rampdown[g, t] <= 0.0
-=======
-        return m.Rampup[g, t] <= (t-1) * m.ramp_single * m.Ramp_lim[g]
-    m.rampup_window_constraint = Constraint(m.G, m.T, rule=rampup_window_rule)
-
-    def rampdown_window_rule(m, g, t):
-        return m.Rampdown[g, t] <= (t-1) * m.ramp_single * m.Ramp_lim[g]
->>>>>>> origin/main
     m.rampdown_window_constraint = Constraint(m.G, m.T, rule=rampdown_window_rule)
 
     def storage_charge_cap_rule(m, s, t):
@@ -176,7 +158,6 @@ def rped_opt_model():
         return m.P_discharge[s, t] <= m.P_dis_cap[s]
     m.storage_discharge_cap_constraint = Constraint(m.S, m.T, rule=storage_discharge_cap_rule)
 
-<<<<<<< HEAD
     def storage_charge_window_rule(m, s, t):
         # Allow storage operation at:
         # - t=1 (commit/energy balance)
@@ -195,8 +176,6 @@ def rped_opt_model():
         return m.P_discharge[s, t] == 0.0
     m.storage_discharge_window_constraint = Constraint(m.S, m.T, rule=storage_discharge_window_rule)
 
-=======
->>>>>>> origin/main
     def storage_energy_bounds_rule(m, s, t):
         return pyo.inequality(m.SoC_min[s], m.SoC[s, t], m.SoC_max[s])
     m.storage_energy_bounds_constraint = Constraint(m.S, m.T, rule=storage_energy_bounds_rule)
@@ -209,7 +188,6 @@ def rped_opt_model():
     m.storage_soc_balance_constraint = Constraint(m.S, m.T, rule=storage_soc_balance_rule)
 
     def storage_no_simul_rule(m, s, t):
-<<<<<<< HEAD
         cap = max(float(pyo.value(m.P_ch_cap[s])), float(pyo.value(m.P_dis_cap[s])))
         return m.P_charge[s, t] + m.P_discharge[s, t] <= cap
     m.storage_no_simul_constraint = Constraint(m.S, m.T, rule=storage_no_simul_rule)
@@ -234,11 +212,6 @@ def rped_opt_model():
         return sum(m.Rampdown[g, tN] for g in m.G) - (storage_net_tN - storage_net_t1) >= (m.Load[t1] - m.Load[tN])
     m.rd_endpoint_constraint = Constraint(rule=rd_endpoint_rule)
 
-=======
-        return m.P_charge[s, t] + m.P_discharge[s, t] <= m.P_ch_cap[s]
-    m.storage_no_simul_constraint = Constraint(m.S, m.T, rule=storage_no_simul_rule)
-
->>>>>>> origin/main
     m.dual = Suffix(direction = Suffix.IMPORT)
     return m
 
@@ -339,12 +312,8 @@ def laed_opt_model():
     m.storage_soc_balance_constraint = Constraint(m.S, m.T, rule=storage_soc_balance_rule)
 
     def storage_no_simul_rule(m, s, t):
-<<<<<<< HEAD
         cap = max(float(pyo.value(m.P_ch_cap[s])), float(pyo.value(m.P_dis_cap[s])))
         return m.P_charge[s, t] + m.P_discharge[s, t] <= cap
-=======
-        return m.P_charge[s, t] + m.P_discharge[s, t] <= m.P_ch_cap[s]
->>>>>>> origin/main
     m.storage_no_simul_constraint = Constraint(m.S, m.T, rule=storage_no_simul_rule)
 
     m.dual = Suffix(direction=Suffix.IMPORT)
@@ -604,15 +573,12 @@ if __name__=="__main__":
     load_scale_2032 = ref_cap/(sum(Aug_2032_ori.values())/len(Aug_2032_ori))
     Aug_2032 = {int(key): value*load_scale_2032 for key, value in Aug_2032_ori.items()}
     data.data()["Load"] = Aug_2032
-<<<<<<< HEAD
     # The projection is 288 points at 5-minute resolution (24h). Ensure storage SoC dynamics
     # use the correct timestep (hours) instead of whatever is in the .dat file.
     if int(len(Aug_2032_ori)) == 288 and "delta_t" in data.data():
         data.data()["delta_t"][None] = 1.0 / 12.0
     if "N_T" in data.data():
         data.data()["N_T"][None] = int(len(Aug_2032_ori))
-=======
->>>>>>> origin/main
 
     nts = np.linspace(1, 19, 19)
     laed_sheds = []

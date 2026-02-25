@@ -9,13 +9,10 @@ import matplotlib.pyplot as plt
 import json
 from tqdm import tqdm
 
-<<<<<<< HEAD
 # Default values (overridden in __main__ when running as a script)
 cost_load = 3500.0
 reserve_factor = 0.0
 
-=======
->>>>>>> origin/main
 
 def _unit_variance_innovation(error_type: str, rng: np.random.Generator, **kwargs) -> float:
     """Return random draw z with E[z] = 0, Var[z] = 1 for requested distribution"""
@@ -142,7 +139,6 @@ def rped_opt_model():
 
     def objective_rule(m):
         gen_cost = sum(m.Cost[g] * m.P[g] for g in m.G)
-<<<<<<< HEAD
         # RP is a single-interval energy dispatch + multi-interval ramp product.
         # Only the commit interval (t=1) is energy-dispatched. Treat t>1 storage
         # variables as capability endpoints for the ramp product, not paid energy.
@@ -150,17 +146,10 @@ def rped_opt_model():
         storage_cost = sum(
             m.charge_cost[s] * m.P_charge[s, 1] + m.discharge_cost[s] * m.P_discharge[s, 1]
             for s in m.S
-=======
-        shed_cost = cost_load * sum(m.Loadshed[t] for t in m.T)
-        storage_cost = (
-            sum(m.charge_cost[s] * m.P_charge[s, t] for s in m.S for t in m.T)
-            + sum(m.discharge_cost[s] * m.P_discharge[s, t] for s in m.S for t in m.T)
->>>>>>> origin/main
         )
         return gen_cost + shed_cost + storage_cost
     m.obj = Objective(rule=objective_rule, sense=minimize)
 
-<<<<<<< HEAD
     # RP only models load shedding at the commitment interval; keep future shedding at 0
     # so it can't "relax" ramp requirements by shedding in non-committed intervals.
     def future_shed_zero_rule(m, t):
@@ -169,8 +158,6 @@ def rped_opt_model():
         return m.Loadshed[t] == 0.0
     m.future_shed_zero_constraint = Constraint(m.T, rule=future_shed_zero_rule)
 
-=======
->>>>>>> origin/main
     def capacity_up_rule(m, g, t):
         return m.P[g] + m.Rampup[g, t] <= m.Capacity[g]
     m.capacity_up_constraint = Constraint(m.G, m.T, rule=capacity_up_rule)
@@ -180,15 +167,10 @@ def rped_opt_model():
     m.capacity_down_constraint = Constraint(m.G, m.T, rule=capacity_down_rule)
 
     def power_balance_rule(m):
-<<<<<<< HEAD
         # Allow storage to participate in the commitment-interval energy balance (t=1).
         # This makes RP/ED able to use storage to reduce load shedding in the same way LAED can.
         net_storage_t1 = sum(m.P_discharge[s, 1] - m.P_charge[s, 1] for s in m.S)
         return sum(m.P[g] for g in m.G) + net_storage_t1 == m.Load[1] - m.Loadshed[1]
-=======
-        net_storage = sum(m.P_discharge[s, 1] - m.P_charge[s, 1] for s in m.S)
-        return sum(m.P[g] for g in m.G) + net_storage == m.Load[1] - m.Loadshed[1]
->>>>>>> origin/main
     m.power_balance_constraint = Constraint(rule=power_balance_rule)
 
     def ramp_down_rule(m, g):
@@ -200,7 +182,6 @@ def rped_opt_model():
     m.ramp_up_constraint = Constraint(m.G, rule=ramp_up_rule)
 
     def rampup_window_rule(m, g, t):
-<<<<<<< HEAD
         # Match laed_rp_analysis.py: only a single 10-minute ramp product at t=2
         if t == 1:
             return m.Rampup[g, t] <= 0.0
@@ -217,14 +198,6 @@ def rped_opt_model():
             return m.Rampdown[g, t] <= m.Ramp_lim[g]
         return m.Rampdown[g, t] <= 0.0
     m.rampdown_window_constraint = Constraint(m.G, m.T, rule=rampdown_window_rule)
-=======
-        return m.Rampup[g, t] <= (t-1) * m.ramp_single * m.Ramp_lim[g]
-    m.rampup_window_constraint = Constraint(m.G, m.T, rule=rampup_window_rule)
-
-    def rampdown_window_rule(m, g, t):
-        return m.Rampdown[g, t] <= (t-1) * m.ramp_single * m.Ramp_lim[g]
-    m.rampdown_window_constraint = Constraint(m.G, m.T, rule = rampdown_window_rule)
->>>>>>> origin/main
 
     def storage_charge_cap_rule(m, s, t):
         return m.P_charge[s, t] <= m.P_ch_cap[s]
@@ -234,7 +207,6 @@ def rped_opt_model():
         return m.P_discharge[s, t] <= m.P_dis_cap[s]
     m.storage_discharge_cap_constraint = Constraint(m.S, m.T, rule=storage_discharge_cap_rule)
 
-<<<<<<< HEAD
     def storage_charge_window_rule(m, s, t):
         # Allow storage operation at:
         # - t=1 (commit/energy balance)
@@ -253,8 +225,6 @@ def rped_opt_model():
         return m.P_discharge[s, t] == 0.0
     m.storage_discharge_window_constraint = Constraint(m.S, m.T, rule=storage_discharge_window_rule)
 
-=======
->>>>>>> origin/main
     def storage_energy_bounds_rule(m, s, t):
         return pyo.inequality(m.SoC_min[s], m.SoC[s, t], m.SoC_max[s])
     m.storage_energy_bounds_constraint = Constraint(m.S, m.T, rule=storage_energy_bounds_rule)
@@ -267,13 +237,9 @@ def rped_opt_model():
     m.storage_soc_balance_constraint = Constraint(m.S, m.T, rule=storage_soc_balance_rule)
 
     def storage_no_simul_rule(m, s, t):
-<<<<<<< HEAD
         # Linear "no simultaneous charge/discharge" proxy (tight enough for this model).
         cap = max(float(pyo.value(m.P_ch_cap[s])), float(pyo.value(m.P_dis_cap[s])))
         return m.P_charge[s, t] + m.P_discharge[s, t] <= cap
-=======
-        return m.P_charge[s, t] + m.P_discharge[s, t] <= m.P_ch_cap[s]
->>>>>>> origin/main
     m.storage_no_simul_constraint = Constraint(m.S, m.T, rule=storage_no_simul_rule)
 
     # def ru_def_rule(m, t):
@@ -295,31 +261,19 @@ def rped_opt_model():
     def ru_endpoint_rule(m):
         t1 = 1
         tN = m.T.last()
-<<<<<<< HEAD
         # Storage contributes to meeting load increases by increasing its net injection from t1->tN.
         storage_net_t1 = sum(m.P_discharge[s, t1] - m.P_charge[s, t1] for s in m.S)
         storage_net_tN = sum(m.P_discharge[s, tN] - m.P_charge[s, tN] for s in m.S)
         return sum(m.Rampup[g, tN] for g in m.G) + (storage_net_tN - storage_net_t1) >= (m.Load[tN] - m.Load[t1])
-=======
-        net_t1 = (m.Load[t1] - m.Loadshed[t1])
-        net_tN = (m.Load[tN] - m.Loadshed[tN])
-        return sum(m.Rampup[g, tN] for g in m.G) >= (net_tN - net_t1)
->>>>>>> origin/main
     m.ru_endpoint_constraint = Constraint(rule=ru_endpoint_rule)
 
     def rd_endpoint_rule(m):
         t1 = 1
         tN = m.T.last()
-<<<<<<< HEAD
         # Storage contributes to meeting load drops by decreasing its net injection from t1->tN.
         storage_net_t1 = sum(m.P_discharge[s, t1] - m.P_charge[s, t1] for s in m.S)
         storage_net_tN = sum(m.P_discharge[s, tN] - m.P_charge[s, tN] for s in m.S)
         return sum(m.Rampdown[g, tN] for g in m.G) - (storage_net_tN - storage_net_t1) >= (m.Load[t1] - m.Load[tN])
-=======
-        net_t1 = (m.Load[t1] - m.Loadshed[t1])
-        net_tN = (m.Load[tN] - m.Loadshed[tN])
-        return sum(m.Rampdown[g, tN] for g in m.G) >= (net_t1 - net_tN)
->>>>>>> origin/main
     m.rd_endpoint_constraint = Constraint(rule=rd_endpoint_rule)
 
     m.dual = Suffix(direction = Suffix.IMPORT)
@@ -366,7 +320,6 @@ def ED_with_error(
     if error_kwargs is None:
         error_kwargs = {}
 
-<<<<<<< HEAD
     # This RP/ED model is implemented as a 10-minute ramp product.
     # Match laed_rp_analysis.py by using a 2-interval window (t=1 commit, t=2 ramp product endpoint).
     if int(N_t) != 2:
@@ -378,10 +331,6 @@ def ED_with_error(
     storage_inputs = _extract_storage_inputs(base)
     N_s = storage_inputs["N_s"]
 
-=======
-    n_steps = N_T - N_t + 1
-
->>>>>>> origin/main
     LMP      = np.zeros((N_g, n_steps))
     TLMP     = np.zeros((N_g, n_steps))
     P_LMP    = np.zeros((N_g, n_steps))
@@ -390,20 +339,10 @@ def ED_with_error(
     rdw_ED   = np.zeros((N_g, n_steps))
     rdwp_Ed  = np.zeros((N_g, n_steps))
     Shed_ED  = np.zeros(n_steps)
-<<<<<<< HEAD
-=======
-    N_s      = storage_inputs["N_s"]
->>>>>>> origin/main
     SoC_ED   = np.zeros((N_s, n_steps)) if N_s > 0 else np.zeros((0, n_steps))
     Pch_ED   = np.zeros((N_s, n_steps)) if N_s > 0 else np.zeros((0, n_steps))
     Pdis_ED  = np.zeros((N_s, n_steps)) if N_s > 0 else np.zeros((0, n_steps))
 
-<<<<<<< HEAD
-=======
-    base = data.data()
-    storage_inputs = _extract_storage_inputs(base)
-
->>>>>>> origin/main
     # True underlying load (scaled) for each physical time in 1..N_T
     load_true = {t: base["Load"][t] * load_factor for t in base["Load"]}
 
@@ -489,15 +428,11 @@ def ED_with_error(
 
         rped = rped_model.create_instance(data=instance_data)
 
-<<<<<<< HEAD
         results = solver.solve(rped, tee=False, load_solutions=False)
         term = str(results.solver.termination_condition).lower()
         status = str(results.solver.status).lower()
         if term != "optimal" or status != "ok":
             raise RuntimeError(f"RPED infeasible/unknown at window {k+1}: status={status}, term={term}")
-=======
-        results = solver.solve(rped, tee=False, load_solutions=True)
->>>>>>> origin/main
         rped.solutions.load_from(results)
 
         P_ed, Shed_ed, LMP_ed, TLMP_ed, rup_ed, rupp_ed, rdw_ed, rdwp_ed = LMP_calculation(rped)
@@ -521,12 +456,8 @@ def ED_with_error(
         # update initial condition for next window (explicit by generator index)
         gen_prev_current = {g: float(P_ed[g - 1]) for g in range(1, N_g + 1)}
         if storage_inputs["N_s"] > 0:
-<<<<<<< HEAD
             # Rolling implementation commits/records interval t=1, so roll SoC forward from t=1.
             soc_init_current = {s: float(pyo.value(rped.SoC[s, 1])) for s in range(1, storage_inputs["N_s"] + 1)}
-=======
-            soc_init_current = {s: float(pyo.value(rped.SoC[s, rped.T.last()])) for s in range(1, storage_inputs["N_s"] + 1)}
->>>>>>> origin/main
 
     return P_LMP, Shed_ED, LMP, TLMP, rup_ED, rupp_Ed, rdw_ED, rdwp_Ed, SoC_ED, Pch_ED, Pdis_ED
 
@@ -636,14 +567,10 @@ def laed_opt_model():
     m.storage_soc_balance_constraint = Constraint(m.S, m.T, rule=storage_soc_balance_rule)
 
     def storage_no_simul_rule(m, s, t):
-<<<<<<< HEAD
         # Linear "no simultaneous charge/discharge" proxy.
         # If P_ch_cap != P_dis_cap, cap by the larger to avoid accidentally constraining net throughput.
         cap = max(float(pyo.value(m.P_ch_cap[s])), float(pyo.value(m.P_dis_cap[s])))
         return m.P_charge[s, t] + m.P_discharge[s, t] <= cap
-=======
-        return m.P_charge[s, t] + m.P_discharge[s, t] <= m.P_ch_cap[s]
->>>>>>> origin/main
     m.storage_no_simul_constraint = Constraint(m.S, m.T, rule=storage_no_simul_rule)
 
     # Dual suffix
@@ -694,11 +621,7 @@ def LAED_with_error(
     rng,
     error_type = 'gaussian', 
     error_kwargs=None,
-<<<<<<< HEAD
     clip_nonnegative=True,
-=======
-    clip_nonnegative=True
->>>>>>> origin/main
 ):
     """
     LAED rolling window with correlated Gaussian load forecast error.
@@ -718,33 +641,20 @@ def LAED_with_error(
         error_kwargs={}
     n_steps = N_T - N_t + 1
 
-<<<<<<< HEAD
     base = data.data()
     storage_inputs = _extract_storage_inputs(base)
     N_s = storage_inputs["N_s"]
 
-=======
->>>>>>> origin/main
     TLMP = np.zeros((N_g, n_steps))
     LLMP = np.zeros((N_g, n_steps))
     P_LAED = np.zeros((N_g, n_steps))
     R_LAED = np.zeros((N_g, n_steps))
     RP_LAED = np.zeros((N_g, n_steps))
     Shed_LAED = np.zeros(n_steps)
-<<<<<<< HEAD
-=======
-    N_s = storage_inputs["N_s"]
->>>>>>> origin/main
     SoC_LAED  = np.zeros((N_s, n_steps)) if N_s > 0 else np.zeros((0, n_steps))
     Pch_LAED  = np.zeros((N_s, n_steps)) if N_s > 0 else np.zeros((0, n_steps))
     Pdis_LAED = np.zeros((N_s, n_steps)) if N_s > 0 else np.zeros((0, n_steps))
 
-<<<<<<< HEAD
-=======
-    base = data.data()
-    storage_inputs = _extract_storage_inputs(base)
-
->>>>>>> origin/main
     # "True" underlying load (scaled) for each physical time in 1..N_T
     load_true = {t: base["Load"][t] * load_factor for t in base["Load"]}
 
@@ -830,15 +740,11 @@ def LAED_with_error(
 
         laed = model_laed.create_instance(data=instance_data)
 
-<<<<<<< HEAD
         results = solver.solve(laed, tee=False, load_solutions=False)
         term = str(results.solver.termination_condition).lower()
         status = str(results.solver.status).lower()
         if term != "optimal" or status != "ok":
             raise RuntimeError(f"LAED infeasible/unknown at window {k+1}: status={status}, term={term}")
-=======
-        results = solver.solve(laed, tee=False, load_solutions=True)
->>>>>>> origin/main
         laed.solutions.load_from(results)
 
         P_laed, Shed_laed, TLMP_T, LLMP_T, _, _, R_laed, Rp_laed = TLMP_calculation(laed, N_g, N_t)
@@ -865,7 +771,6 @@ def LAED_with_error(
     return P_LAED, Shed_LAED, TLMP, LLMP, R_LAED, RP_LAED, SoC_LAED, Pch_LAED, Pdis_LAED
 
 
-<<<<<<< HEAD
 def plot_demand_soc_dispatch_shedding(
     *,
     load: dict,
@@ -970,8 +875,6 @@ def plot_demand_soc_dispatch_shedding(
     plt.close(fig)
 
 
-=======
->>>>>>> origin/main
 
 
 if __name__=="__main__":
@@ -988,11 +891,7 @@ if __name__=="__main__":
     data.load(filename=case_name)
     seed = 42
     sigma = 0.05 #std of error as percentage of load projection
-<<<<<<< HEAD
     rho = 0.95 #correlation between previous prediction and current prediction
-=======
-    rho = 0.99 #correlation between previous prediction and current prediction
->>>>>>> origin/main
 
     #set the seed
     rng = np.random.default_rng(seed)
@@ -1010,12 +909,9 @@ if __name__=="__main__":
     Aug_2032 = {int(key): value*load_scale_2032 for key, value in Aug_2032_ori.items()}
 
     data.data()["Load"] = Aug_2032
-<<<<<<< HEAD
     # The projection is 288 points at 5-minute resolution (24h). Ensure storage SoC dynamics
     # use the correct timestep (hours) instead of whatever is in the .dat file.
     data.data()["delta_t"][None] = 1.0 / 12.0
-=======
->>>>>>> origin/main
 
     # nts = np.linspace(1, 19, 19)
     # laed_sheds = []
@@ -1027,19 +923,12 @@ if __name__=="__main__":
     #     data.data()["N_t"][None] = int(i)
 
     # #define window size
-<<<<<<< HEAD
     data.data()["N_t"][None] = 26
-=======
-    data.data()["N_t"][None] = 10
->>>>>>> origin/main
     
     #define policy parameters
     N_g = data.data()['N_g'][None]
     N_t = data.data()['N_t'][None]
-<<<<<<< HEAD
     N_t_rp = 2
-=======
->>>>>>> origin/main
     N_T = data.data()["N_T"][None]
     N_T = len(Aug_2032_ori)
     cost_init = data.data()['Cost']
@@ -1094,17 +983,11 @@ if __name__=="__main__":
     data_laed = copy.deepcopy(data)
     data_ed = copy.deepcopy(data)
         
-<<<<<<< HEAD
     P_ED, Shed_ED, LMP, TLMP, rup_ED, rupp_Ed, rdw_ED, rdwp_Ed, SoC_ED, Pch_ED, Pdis_ED = ED_with_error(
         data_ed, N_g, N_t_rp, N_T, load_factor, ramp_factor, solver, sigma, rho, rng, error_type="gaussian"
     )
     #P_LAED, Shed_LAED, Curt_LAED, TLMP, LLMP, R_LAED, RP_LAED = LAED_No_Errors(data_laed, N_g, N_t, N_T,load_factor, ramp_factor, solver)
     P_LAED, Shed_LAED, TLMP, LLMP, R_LAED, RP_LAED, SoC_LAED, Pch_LAED, Pdis_LAED = LAED_with_error(data_laed, N_g, N_t, N_T, load_factor, ramp_factor, solver, sigma, rho, rng, error_type="gaussian")
-=======
-    P_ED, Shed_ED, LMP, TLMP, rup_ED, rupp_Ed, rdw_ED, rdwp_Ed, SoC_ED, Pch_ED, Pdis_ED = ED_with_error(data_ed, N_g, N_t, N_T, load_factor, ramp_factor, solver, sigma, rho, rng, error_type="student-t")
-    #P_LAED, Shed_LAED, Curt_LAED, TLMP, LLMP, R_LAED, RP_LAED = LAED_No_Errors(data_laed, N_g, N_t, N_T,load_factor, ramp_factor, solver)
-    P_LAED, Shed_LAED, TLMP, LLMP, R_LAED, RP_LAED, SoC_LAED, Pch_LAED, Pdis_LAED = LAED_with_error(data_laed, N_g, N_t, N_T, load_factor, ramp_factor, solver, sigma, rho, rng, error_type="student-t")
->>>>>>> origin/main
 
     # laed_sheds.append(np.sum(Shed_LAED)/12)
     # rp_sheds.append(np.sum(Shed_ED)/12)
@@ -1127,7 +1010,6 @@ if __name__=="__main__":
 
     print('Mean Demand:', avg_demand)
     print('Load Shedding in LAED:', np.sum(Shed_LAED)/12)
-<<<<<<< HEAD
     print('Load Shedding in ED with only 10-min ramp product:', np.sum(Shed_ED)/12)
     
     plot_demand_soc_dispatch_shedding(
@@ -1142,64 +1024,3 @@ if __name__=="__main__":
         show=True,
         out_path=None,
     )
-=======
-    print('Load Shedding in ED with only', str(5*(data.data()['N_t'][None]-1)), '-min ramp product:', np.sum(Shed_ED)/12)
-    
-    times = np.linspace(1,len(Shed_ED), len(Shed_ED))
-
-    plt.figure()
-    plt.plot(times, Shed_LAED, label="LAED Load Shedding")
-    plt.plot(times, Shed_ED, label="RP Load Shedding")
-    plt.plot(times, list(data.data()["Load"].values())[:len(times)], label="Load")
-    plt.plot(times, P_ED[0], label="Gen 1 RP")
-    plt.plot(times, P_ED[1], label="Gen 2 RP")
-    plt.plot(times, P_LAED[0], label="Gen 1 LAED")
-    plt.plot(times, P_LAED[1], label="Gen 2 LAED")
-    plt.legend()
-    plt.show()
-
-    # Plot storage trajectories from the last run in the sweep (largest window).
-    if "SoC_LAED" in locals() and SoC_LAED.size > 0:
-        times = np.arange(1, SoC_LAED.shape[1] + 1)
-
-        plt.figure()
-        for s_idx in range(SoC_LAED.shape[0]):
-            plt.plot(times, SoC_LAED[s_idx], label=f"SoC LAED s{ s_idx+1 }")
-        plt.xlabel("Physical time index")
-        plt.ylabel("State of Charge (MWh)")
-        plt.title("LAED storage SoC (last sweep run)")
-        plt.legend()
-        plt.show()
-
-        plt.figure()
-        for s_idx in range(SoC_LAED.shape[0]):
-            plt.plot(times, Pch_LAED[s_idx], label=f"Charge LAED s{ s_idx+1 }")
-            plt.plot(times, Pdis_LAED[s_idx], linestyle="--", label=f"Discharge LAED s{ s_idx+1 }")
-        plt.xlabel("Physical time index")
-        plt.ylabel("Power (MW)")
-        plt.title("LAED storage charge/discharge (last sweep run)")
-        plt.legend()
-        plt.show()
-
-    if "SoC_ED" in locals() and SoC_ED.size > 0:
-        times = np.arange(1, SoC_ED.shape[1] + 1)
-
-        plt.figure()
-        for s_idx in range(SoC_ED.shape[0]):
-            plt.plot(times, SoC_ED[s_idx], label=f"SoC RP s{ s_idx+1 }")
-        plt.xlabel("Physical time index")
-        plt.ylabel("State of Charge (MWh)")
-        plt.title("RP storage SoC (last sweep run)")
-        plt.legend()
-        plt.show()
-
-        plt.figure()
-        for s_idx in range(SoC_ED.shape[0]):
-            plt.plot(times, Pch_ED[s_idx], label=f"Charge RP s{ s_idx+1 }")
-            plt.plot(times, Pdis_ED[s_idx], linestyle="--", label=f"Discharge RP s{ s_idx+1 }")
-        plt.xlabel("Physical time index")
-        plt.ylabel("Power (MW)")
-        plt.title("RP storage charge/discharge (last sweep run)")
-        plt.legend()
-        plt.show()
->>>>>>> origin/main
