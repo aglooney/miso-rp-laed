@@ -19,7 +19,7 @@ python laed_rp_storage_no_error.py
 
 ### Solver
 
-Most scripts default to `SolverFactory("gurobi_direct")`. If you don’t have Gurobi, switch to a Pyomo solver you do have installed (e.g. `highs`, `glpk`, `cbc`), or use `--solver` for the CLI scripts below.
+Most scripts default to `SolverFactory("gurobi_direct")`. If you don't have Gurobi, switch to a Pyomo solver you do have installed (e.g. `highs`, `glpk`, `cbc`), or use `--solver` for the CLI scripts below.
 
 ## Repository layout
 
@@ -85,6 +85,7 @@ Compare shedding with/without storage:
 
 ```bash
 python compare_shedding_storage.py --help
+mkdir -p figures
 python compare_shedding_storage.py --case toy_data_storage.dat --laed-window 13 --sigma 0.05 --rho 0.99 --seed 42 --out figures/shedding_compare.png --no-show
 ```
 
