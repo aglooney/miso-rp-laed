@@ -1,5 +1,9 @@
+.DS_Store
 figures/
 *.pyc
 __pycache__/
 miso_venv/
+newvenv/
+.venv/
+venv/
 .ipynb_checkpoints/
