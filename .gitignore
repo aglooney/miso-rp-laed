@@ -1,0 +1,5 @@
+figures/
+*.pyc
+__pycache__/
+miso_venv/
+.ipynb_checkpoints/
