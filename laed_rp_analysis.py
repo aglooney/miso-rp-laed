@@ -3,7 +3,6 @@ import copy
 import json
 import os
 import time
-import matplotlib.pyplot as plt
 from pyomo.environ import (
             AbstractModel, Param, RangeSet, Var, Constraint, Objective, Suffix, minimize, DataPortal,
             NonNegativeIntegers, NonNegativeReals, value, SolverFactory, Set
@@ -13,6 +12,7 @@ from pyomo.environ import (
 # Global policy/penalty parameters. Other scripts typically overwrite these on import.
 reserve_factor = 0.0
 cost_load = 1e10
+cost_curtailed = 0.0
 
 
 # def rped_opt_model():
@@ -140,7 +140,7 @@ cost_load = 1e10
 
 #     return m
 
-def rped_opt_model():
+def rped_opt_model(full_feasibility=False):
     m = AbstractModel()
 
     # sizes / sets
@@ -164,15 +164,22 @@ def rped_opt_model():
     m.Rampup = Var(m.G, m.T, within=NonNegativeReals)
     m.Rampdown = Var(m.G, m.T, within=NonNegativeReals)
     m.Loadshed = Var(m.T, within=NonNegativeReals)
+    m.Curtailed = Var(m.T, within=NonNegativeReals)
 
     # objective (NO ramp variables in objective, as you requested)
     def objective_rule(m):
-        return sum(m.Cost[g] * m.P[g] for g in m.G) + cost_load * sum(m.Loadshed[t] for t in m.T)
+        # Keep curtailment effectively "free" by default, but include a tiny coefficient to avoid degeneracy.
+        curtail_penalty = float(cost_curtailed) if float(cost_curtailed) > 0.0 else 1e-6
+        return (
+            sum(m.Cost[g] * m.P[g] for g in m.G)
+            + cost_load * sum(m.Loadshed[t] for t in m.T)
+            + curtail_penalty * sum(m.Curtailed[t] for t in m.T)
+        )
     m.obj = Objective(rule=objective_rule, sense=minimize)
 
     # single-interval power balance (only t=1)
     def power_balance_rule(m):
-        return sum(m.P[g] for g in m.G) == m.Load[1] - m.Loadshed[1]
+        return sum(m.P[g] for g in m.G) == m.Load[1] - m.Loadshed[1] + m.Curtailed[1]
     m.power_balance_constraint = Constraint(rule=power_balance_rule)
 
     # ramping from previous dispatch to current dispatch
@@ -220,28 +227,41 @@ def rped_opt_model():
         if tN < 2:
             # No meaningful endpoint ramp requirement if window is 1 step
             return Constraint.Skip
-        return sum(m.Rampup[g, tN] for g in m.G) >= (m.Load[tN] - m.Load[1])
+        net_t1 = m.Load[1] - m.Loadshed[1] + m.Curtailed[1]
+        net_tN = m.Load[tN] - m.Loadshed[tN] + m.Curtailed[tN]
+        return sum(m.Rampup[g, tN] for g in m.G) >= (net_tN - net_t1)
     m.ru_endpoint_constraint = Constraint(rule=ru_endpoint_rule)
 
     def rd_endpoint_rule(m):
         tN = _tN(m)
         if tN < 2:
             return Constraint.Skip
-        return sum(m.Rampdown[g, tN] for g in m.G) >= (m.Load[1] - m.Load[tN])
+        net_t1 = m.Load[1] - m.Loadshed[1] + m.Curtailed[1]
+        net_tN = m.Load[tN] - m.Loadshed[tN] + m.Curtailed[tN]
+        return sum(m.Rampdown[g, tN] for g in m.G) >= (net_t1 - net_tN)
     m.rd_endpoint_constraint = Constraint(rule=rd_endpoint_rule)
 
     # 10-minute requirement (kept, but named separately)
     def ru_10min_rule(m):
         if m.T.last() < 2:
             return Constraint.Skip
-        return sum(m.Rampup[g, 2] for g in m.G) >= (m.Load[2] - m.Load[1])
+        net_t1 = m.Load[1] - m.Loadshed[1] + m.Curtailed[1]
+        net_t2 = m.Load[2] - m.Loadshed[2] + m.Curtailed[2]
+        return sum(m.Rampup[g, 2] for g in m.G) >= (net_t2 - net_t1)
     m.ru_10min_constraint = Constraint(rule=ru_10min_rule)
 
     def rd_10min_rule(m):
         if m.T.last() < 2:
             return Constraint.Skip
-        return sum(m.Rampdown[g, 2] for g in m.G) >= (m.Load[1] - m.Load[2])
+        net_t1 = m.Load[1] - m.Loadshed[1] + m.Curtailed[1]
+        net_t2 = m.Load[2] - m.Loadshed[2] + m.Curtailed[2]
+        return sum(m.Rampdown[g, 2] for g in m.G) >= (net_t1 - net_t2)
     m.rd_10min_constraint = Constraint(rule=rd_10min_rule)
+
+    # Bound shedding in each interval (prevents "negative net load" artifacts when used as a feasibility slack).
+    def loadshed_limit_rule(m, t):
+        return m.Loadshed[t] <= m.Load[t]
+    m.loadshed_limit_constraint = Constraint(m.T, rule=loadshed_limit_rule)
 
     # ---- Single-generator ramp bid willingness (exactly like your original) ----
     def rampup_single_endpoint_rule(m, g):
@@ -269,6 +289,31 @@ def rped_opt_model():
             return Constraint.Skip
         return m.Rampdown[g, 2] <= (2 - 1) * m.ramp_single * m.Ramp_lim[g]
     m.rampdw_single_10min_constraint = Constraint(m.G, rule=rampdw_single_10min_rule)
+
+    if full_feasibility:
+        def full_rampup_capacity_rule(m, g, t):
+            return m.Rampup[g, t] <= m.Ramp_lim[g]
+        m.rp_up_cap = Constraint(m.G, m.T, rule=full_rampup_capacity_rule)
+
+        def full_rampdown_capacity_rule(m, g, t):
+            return m.Rampdown[g, t] <= m.Ramp_lim[g]
+        m.rp_dn_cap = Constraint(m.G, m.T, rule=full_rampdown_capacity_rule)
+
+        def rp_up_suff_rule(m, t):
+            if t == m.T.first():
+                return Constraint.Skip
+            net_t = (m.Load[t] - m.Loadshed[t] + m.Curtailed[t])
+            net_tm1 = (m.Load[t - 1] - m.Loadshed[t - 1] + m.Curtailed[t - 1])
+            return sum(m.Rampup[g, t] for g in m.G) >= (net_t - net_tm1)
+        m.rp_up_suff = Constraint(m.T, rule=rp_up_suff_rule)
+
+        def rp_dn_suff_rule(m, t):
+            if t == m.T.first():
+                return Constraint.Skip
+            net_t = (m.Load[t] - m.Loadshed[t] + m.Curtailed[t])
+            net_tm1 = (m.Load[t - 1] - m.Loadshed[t - 1] + m.Curtailed[t - 1])
+            return sum(m.Rampdown[g, t] for g in m.G) >= (net_tm1 - net_t)
+        m.rp_dn_suff = Constraint(m.T, rule=rp_dn_suff_rule)
 
     # duals
     m.dual = Suffix(direction=Suffix.IMPORT)
@@ -370,8 +415,8 @@ def ED_no_errors(data, N_g, N_t, N_T, load_factor, ramp_factor, solver):
         results = solver.solve(rped, tee=False)
         term = str(results.solver.termination_condition).lower()
         status = str(results.solver.status).lower()
-        if term != 'optimal' and status != 'ok':
-            raise RuntimeError(f"RPED infeasible/unknown at window {k+1}: status={status}, term={term}")
+        if term != "optimal":
+            raise RuntimeError(f"RPED solve failed at window {k+1}: status={status}, term={term}")
 
         # print(f"Loadshed: {[value(inst.Loadshed[t]) for t in inst.T]}")
         # print(f"Load: {[value(inst.Load[t]) for t in inst.T]}")
@@ -425,12 +470,18 @@ def laed_opt_model():
     # Vars
     m.P = Var(m.G, m.T, within=NonNegativeReals)
     m.Loadshed = Var(m.T, within=NonNegativeReals)
+    m.Curtailed = Var(m.T, within=NonNegativeReals)
     m.Reserve = Var(m.G, m.T, within=NonNegativeReals)
 
     # Objective
     def objective_rule(m):
-        return sum(sum(m.Cost[g] * m.P[g, t] for g in m.G) 
-                   + cost_load * m.Loadshed[t] for t in m.T)
+        curtail_penalty = float(cost_curtailed) if float(cost_curtailed) > 0.0 else 1e-6
+        return sum(
+            sum(m.Cost[g] * m.P[g, t] for g in m.G)
+            + cost_load * m.Loadshed[t]
+            + curtail_penalty * m.Curtailed[t]
+            for t in m.T
+        )
     m.obj = Objective(rule=objective_rule, sense=minimize)
 
     # Capacity
@@ -440,7 +491,7 @@ def laed_opt_model():
 
     # Power balance
     def power_balance_rule(m, t):
-        return sum(m.P[g, t] for g in m.G) == m.Load[t] - m.Loadshed[t]
+        return sum(m.P[g, t] for g in m.G) == m.Load[t] - m.Loadshed[t] + m.Curtailed[t]
     m.power_balance_constraint = Constraint(m.T, rule=power_balance_rule)
 
     # Ramping (fixed to properly link time)
@@ -475,10 +526,6 @@ def TLMP_calculation(model, N_g, N_t):
     R_value = np.array([[value(model.Reserve[g, t]) for t in model.T] for g in model.G])
     loadshed_value = np.array([value(model.Loadshed[t]) for t in model.T])
 
-
-    # Power balance duals (lambda): equality constraint, so dual sign is solver-dependent.
-    # In our models, this dual is already the marginal cost of load (positive under Gurobi),
-    # so we do not take abs().
     LMP = np.array([float(model.dual.get(model.power_balance_constraint[t], 0.0)) for t in model.T], dtype=float)
 
     # Ramping duals: these are (<=) constraints in a minimization LP, so Gurobi reports them as <= 0 when binding.
@@ -495,33 +542,25 @@ def TLMP_calculation(model, N_g, N_t):
     # Reserve duals: reserve_constraint is (>=), so the economic multiplier is already >= 0 (typically).
     R_price = np.array([float(model.dual.get(model.reserve_constraint[t], 0.0)) for t in model.T], dtype=float)
 
-    # Clean up numerical noise so tiny dual values don't create TLMP jitter.
-    eps = 1e-9
-    LMP[np.abs(LMP) < eps] = 0.0
-    mu_down[np.abs(mu_down) < eps] = 0.0
-    mu_up[np.abs(mu_up) < eps] = 0.0
-    R_price[np.abs(R_price) < eps] = 0.0
-
     # Initialize TLMP_T matrix
     TLMP_T = np.zeros((N_g, N_t))
 
     # Generator-specific TLMP.
     # User convention: use current minus prior ramping multipliers:
     #   TLMP_g,t = LMP_t + (Δμ_g,t - Δμ_g,t-1),  where Δμ := μ_up - μ_down
+    
     deta = mu_up - mu_down
-    for s in range(N_t):
-        if s == 0:
+    for t in range(N_t):
+        if t == N_t - 1:
             deta_prev = 0.0
         else:
-            deta_prev = deta[:, s - 1]
-        TLMP_T[:, s] = LMP[s] + (deta[:, s] - deta_prev)
-    
-    # Monitor the Active Reserve Constraint
-    #print('Dual of Reserve',deta)
+            deta_prev = deta[:, t + 1]
+        TLMP_T[:, t] = LMP[t] + (deta[:, t] - deta_prev)
     return P_value, loadshed_value, TLMP_T, LMP, mu_down, mu_up, R_value, R_price
 
 
 def plot_prices_over_time(times, rp_lmp, laed_lmp, laed_tlmp, out_path=None, show=True):
+    import matplotlib.pyplot as plt
     """
     times: 1D array of committed time indices
     rp_lmp, laed_lmp: 1D arrays (system prices)
@@ -536,8 +575,11 @@ def plot_prices_over_time(times, rp_lmp, laed_lmp, laed_tlmp, out_path=None, sho
     ax1.legend()
 
     # TLMP: 2 lines (one per generator), as requested.
-    ax2.plot(times, laed_tlmp[0, :], label="LAED TLMP Gen 1")
-    ax2.plot(times, laed_tlmp[1, :], label="LAED TLMP Gen 2")
+    ax2.plot(times, laed_tlmp[1, :], label="TLMP Gen 2")
+    ax2.plot(times, laed_tlmp[6, :], label="TLMP Gen 7")
+    ax2.plot(times, laed_tlmp[4, :], label="TLMP Gen 8")
+    #ax2.plot(times, laed_tlmp[7, :], label="TLMP Gen 9")
+    ax2.plot(times, laed_tlmp[9, :], label="TLMP Gen 10")
     ax2.set_ylabel("Price ($/MWh)")
     ax2.set_xlabel("Committed time index")
     ax2.grid(True, alpha=0.25)
@@ -553,45 +595,52 @@ def plot_prices_over_time(times, rp_lmp, laed_lmp, laed_tlmp, out_path=None, sho
         plt.show()
     return fig
 
-# def TLMP_calculation(model, N_g, N_t):
-#     H = model.T.last()
 
-#     P_value = np.array([[value(model.P[g, t]) for t in model.T] for g in model.G], dtype=float)
-#     R_value = np.array([[value(model.Reserve[g,t]) for t in model.T] for g in model.G], dtype=float)
-#     loadshed_value = np.array([value(model.Loadshed[t]) for t in model.T], dtype=float)
+def _as_1d_float_series(x, name="series"):
+    arr = np.asarray(x, dtype=float).squeeze()
+    if arr.ndim != 1:
+        raise ValueError(f"{name} must be a 1D array-like time series; got shape {arr.shape}")
+    return arr
 
-#     LMP = np.array([model.dual.get(model.power_balance_constraint[t], 0.0) for t in model.T], dtype=float)
 
-#     # Pyomo reports duals based on internal canonical form. For minimization with
-#     # "<=" constraints, economically meaningful multipliers are typically -dual.
-#     mu_down_raw = np.array(
-#         [[model.dual.get(model.ramp_down_constraint[g, t], 0.0) for t in model.T] for g in model.G],
-#         dtype=float,
-#     )
-#     mu_up_raw = np.array(
-#         [[model.dual.get(model.ramp_up_constraint[g, t], 0.0) for t in model.T] for g in model.G],
-#     #     dtype=float,
-    # )
-    # mu_down = -mu_down_raw
-    # mu_up = -mu_up_raw
+def price_std_over_time(pi_t, ddof=0):
+    """
+    Standard deviation of a price series over time.
 
-    # R_price = np.abs(np.array([model.dual.get(model.reserve_constraint[t], 0.0) for t in model.T], dtype=float))
+    Parameters
+    ----------
+    pi_t : array-like, shape (T,)
+        Price time series π_t.
+    ddof : int
+        Delta degrees of freedom passed to `np.std`.
+    """
+    pi = _as_1d_float_series(pi_t, name="pi_t")
+    if pi.size == 0:
+        return float("nan")
+    return float(np.std(pi, ddof=ddof))
 
-    # TLMP_T = np.zeros((N_g, H), dtype=float)
 
-    # for gi, _ in enumerate(model.G):
-    #     for t in range(1, H + 1):
-    #         t_idx = t - 1
-    #         delta_mu_t = mu_up[gi, t_idx] - mu_down[gi, t_idx]
-    #         # User-specified convention: use current minus prior ramp multipliers.
-    #         # (mu_up_t - mu_down_t) - (mu_up_{t-1} - mu_down_{t-1})
-    #         if t == 1:
-    #             delta_mu_prev = 0.0
-    #         else:
-    #             delta_mu_prev = mu_up[gi, t_idx - 1] - mu_down[gi, t_idx - 1]
-    #         TLMP_T[gi, t_idx] = LMP[t_idx] + (delta_mu_t - delta_mu_prev)
+def mean_abs_intertemporal_change(pi_t):
+    r"""
+    Mean absolute intertemporal change:
 
-    # return P_value, loadshed_value, TLMP_T, LMP, mu_down, mu_up, R_value, R_price
+        V_MA = (1/(T-1)) * sum_{t=2..T} |π_t - π_{t-1}|
+
+    Equivalent to `mean(abs(diff(pi_t)))`.
+    """
+    pi = _as_1d_float_series(pi_t, name="pi_t")
+    if pi.size < 2:
+        return 0.0
+    return float(np.mean(np.abs(np.diff(pi))))
+
+
+def price_volatility_metrics(pi_t, ddof=0):
+    """Convenience wrapper returning both level and change volatility metrics."""
+    pi = _as_1d_float_series(pi_t, name="pi_t")
+    return {
+        "std": price_std_over_time(pi, ddof=ddof),
+        "v_ma": mean_abs_intertemporal_change(pi),
+    }
 
 
 # ----------------------------------------------------------------------
@@ -754,27 +803,11 @@ def LAED_No_Errors(data, N_g, N_t, N_T, load_factor, ramp_factor, solver):
 
         laed = model_laed.create_instance(data=instance_data)
         results = solver.solve(laed, tee=False)
+        term = str(results.solver.termination_condition).lower()
+        status = str(results.solver.status).lower()
+        if term != "optimal":
+            raise RuntimeError(f"LAED solve failed at window {k+1}: status={status}, term={term}")
 
-
-        # print("\n=== Dual summary by time ===")
-        # for t in laed.T:
-        # #     lam = laed.dual.get(laed.power_balance_constraint[t], None) if t in laed.power_balance_constraint else None
-        # #     lam_econ = -lam if lam is not None else None
-
-        # #     #res = laed.dual.get(laed.reserve_constraint[t], None) if t in laed.reserve_constraint else None
-
-        # #     print(f"\nt = {t}")
-        # #     print(f"  LLMP raw     = {lam}")
-        # #     print(f"  LLMP econ    = {lam_econ}")
-        # #     #print(f"  Reserve dual = {res}")
-
-        #     for g in laed.G:
-        #         mu_u = laed.dual.get(laed.ramp_up_constraint[g, t], None) if (g, t) in laed.ramp_up_constraint else None
-        #         mu_d = laed.dual.get(laed.ramp_down_constraint[g, t], None) if (g, t) in laed.ramp_down_constraint else None
-        #         print(f"t={t} \t  g={g}: mu_up={mu_u}, mu_down={mu_d}")
-
-
-        # TLMP_calculation should infer H from laed.T.last()
         #P_laed, Shed_laed, Curt_laed, TLMP_T, LLMP_T, _, _, R_laed, Rp_laed = TLMP_calculation(laed, N_g, N_t)
         P_laed, Shed_laed, TLMP_T, LLMP_T, _, _, R_laed, Rp_laed = TLMP_calculation(laed, N_g, N_t)
         # Commit t=1 (tau=0)
@@ -790,22 +823,22 @@ def LAED_No_Errors(data, N_g, N_t, N_T, load_factor, ramp_factor, solver):
         gen_init_current = {g: float(P_laed[g - 1, 0]) for g in range(1, N_g + 1)}
 
     #return P_LAED, Shed_LAED, Curt_LAED, TLMP, LLMP, R_LAED, RP_LAED
+    #(f"Full TLMP Shape: {TLMP.shape}")
+    #print(np.sum(TLMP, axis=1))
     return P_LAED, Shed_LAED, TLMP, LLMP, R_LAED, RP_LAED
 
 
 
 if __name__=="__main__":
-    print("Script started. Loading Pyomo...", flush=True)
-    print("Pyomo loaded.", flush=True)
 
     #system configs
     solver = SolverFactory("gurobi_direct")
     solver.options['OutputFlag'] = 0
     load_factor = 1.0
     reserve_factor = 0
-    ramp_factor = 0.1
-    cost_load = 1e10
-    case_name = 'toy_data.dat'
+    ramp_factor = 0.15
+    cost_load = 3500
+    case_name = '10GEN_MASKED.dat'
     data = DataPortal()
     data.load(filename=case_name)
 
@@ -813,7 +846,7 @@ if __name__=="__main__":
     with open(file_path, 'r') as f:
         interpolated_data = json.load(f)
 
-    ref_cap=500
+    ref_cap=1050
 
     Aug_2032_ori = interpolated_data['2032_Aug']
     load_scale_2032 = ref_cap/(sum(Aug_2032_ori.values())/len(Aug_2032_ori))
@@ -822,129 +855,144 @@ if __name__=="__main__":
 
     data.data()["Load"] = Aug_2032
 
-    nts = np.linspace(1, 41, 40)
-    laed_sheds = []
-    rp_sheds = []
-    laed_times_s = []
-    rp_times_s = []
+    # nts = np.linspace(1, 41, 40)
+    # laed_sheds = []
+    # rp_sheds = []
+    # laed_times_s = []
+    # rp_times_s = []
 
-    for i in range(1,41):
+    # #for i in range(1,41):
 
         #     #define window size
-        data.data()["N_t"][None] = int(i)
+       #data.data()["N_t"][None] = int(i)
 
-        # # #define window size
-        #data.data()["N_t"][None] = 13
-        #define policy parameters
-        N_g = data.data()['N_g'][None]
-        N_t = data.data()['N_t'][None]
-        N_T = data.data()["N_T"][None]
-        N_T = len(Aug_2032_ori)
-        cost_init = data.data()['Cost']
+    #define window size
+    data.data()["N_t"][None] = 13
+    #define policy parameters
+    N_g = data.data()['N_g'][None]
+    N_t = data.data()['N_t'][None]
+    N_T = data.data()["N_T"][None]
+    N_T = len(Aug_2032_ori)
+    cost_init = data.data()['Cost']
 
-        if N_g != 2:
-            Load_ini = data.data()['Load'][1]
-            # Create an abstract model
-            model_ini = AbstractModel()
-            model_ini.N_g = Param(within=NonNegativeIntegers) # Number of Generators
-            model_ini.G = RangeSet(1, model_ini.N_g)  # Set of Generators
-            model_ini.Cost = Param(model_ini.G)
-            model_ini.Capacity = Param(model_ini.G)
-            model_ini.reserve_single = Param()
-            # Define variables
-            model_ini.P = Var(model_ini.G,  within=NonNegativeReals)
-            model_ini.Reserve = Var(model_ini.G, within=NonNegativeReals)
+    if N_g != 2:
+        Load_ini = data.data()['Load'][1]
+        # Create an abstract model
+        model_ini = AbstractModel()
+        model_ini.N_g = Param(within=NonNegativeIntegers) # Number of Generators
+        model_ini.G = RangeSet(1, model_ini.N_g)  # Set of Generators
+        model_ini.Cost = Param(model_ini.G)
+        model_ini.Capacity = Param(model_ini.G)
+        model_ini.reserve_single = Param()
+        # Define variables
+        model_ini.P = Var(model_ini.G,  within=NonNegativeReals)
+        model_ini.Reserve = Var(model_ini.G, within=NonNegativeReals)
 
-            # Objective function: Minimize cost
-            def objective_rule(model):
-                return sum(model.Cost[g] * model.P[g] for g in model.G) 
-            model_ini.obj = Objective(rule=objective_rule, sense=minimize)
+        # Objective function: Minimize cost
+        def objective_rule(model):
+            return sum(model.Cost[g] * model.P[g] for g in model.G) 
+        model_ini.obj = Objective(rule=objective_rule, sense=minimize)
 
-            # Power balance constraints
-            def power_balance_rule(model):
-                return sum(model.P[g] for g in model.G) == Load_ini 
-            model_ini.power_balance_constraint = Constraint(rule=power_balance_rule)
+        # Power balance constraints
+        def power_balance_rule(model):
+            return sum(model.P[g] for g in model.G) == Load_ini 
+        model_ini.power_balance_constraint = Constraint(rule=power_balance_rule)
 
-            # Capacity constraints
-            def capacity_rule(model,g):
-                return model.P[g] + model.Reserve[g] <= model.Capacity[g]
-            model_ini.capacity_constraint = Constraint(model_ini.G, rule=capacity_rule)
+        # Capacity constraints
+        def capacity_rule(model,g):
+            return model.P[g] + model.Reserve[g] <= model.Capacity[g]
+        model_ini.capacity_constraint = Constraint(model_ini.G, rule=capacity_rule)
 
-            # Reserve constraints, total reserve is reserve_factor of the total load
-            def reserve_rule(model):
-                return sum(model.Reserve[g] for g in model.G) >= reserve_factor * Load_ini
-            model_ini.reserve_constraint = Constraint(rule=reserve_rule)
+        # Reserve constraints, total reserve is reserve_factor of the total load
+        def reserve_rule(model):
+            return sum(model.Reserve[g] for g in model.G) >= reserve_factor * Load_ini
+        model_ini.reserve_constraint = Constraint(rule=reserve_rule)
 
-            # Single Generator Reserve Bid
-            def reserve_single_rule(model, g):
-                return model.Reserve[g] <= model.reserve_single * model.Capacity[g]
-            model_ini.reserve_single_constraint = Constraint(model_ini.G,  rule=reserve_single_rule)
+        # Single Generator Reserve Bid
+        def reserve_single_rule(model, g):
+            return model.Reserve[g] <= model.reserve_single * model.Capacity[g]
+        model_ini.reserve_single_constraint = Constraint(model_ini.G,  rule=reserve_single_rule)
 
-            ed_ini = model_ini.create_instance(data)
-            solver.solve(ed_ini, tee=False)
+        ed_ini = model_ini.create_instance(data)
+        solver.solve(ed_ini, tee=False)
 
-            data.data()['Gen_init'] = {g: ed_ini.P[g].value for g in ed_ini.G}
+        data.data()['Gen_init'] = {g: ed_ini.P[g].value for g in ed_ini.G}
 
-        else:
-            Gen1_ini = np.min([data.data()['Capacity'][1],data.data()['Load'][1]])
-            data.data()['Gen_init'] = {1: Gen1_ini, 2: np.min([data.data()['Capacity'][2], data.data()['Load'][1]- Gen1_ini])}
+    else:
+        Gen1_ini = np.min([data.data()['Capacity'][1],data.data()['Load'][1]])
+        data.data()['Gen_init'] = {1: Gen1_ini, 2: np.min([data.data()['Capacity'][2], data.data()['Load'][1]- Gen1_ini])}
 
-        data_laed = copy.deepcopy(data)
-        data_ed = copy.deepcopy(data)
+    data_laed = copy.deepcopy(data)
+    data_ed = copy.deepcopy(data)
 
-        t0 = time.perf_counter()
-        P_ED, Shed_ED, LMP_ED, TLMP_ED, rup_ED, rupp_Ed, rdw_ED, rdwp_Ed = ED_no_errors(
-            data_ed, N_g, N_t, N_T, load_factor, ramp_factor, solver
-        )
-        rp_times_s.append(time.perf_counter() - t0)
+    t0 = time.perf_counter()
+    P_ED, Shed_ED, LMP_ED, TLMP_ED, rup_ED, rupp_Ed, rdw_ED, rdwp_Ed = ED_no_errors(
+        data_ed, N_g, N_t, N_T, load_factor, ramp_factor, solver
+    )
+    #rp_times_s.append(time.perf_counter() - t0)
 
-        t0 = time.perf_counter()
-        P_LAED, Shed_LAED, TLMP_LAED, LLMP_LAED, R_LAED, RP_LAED = LAED_No_Errors(
-            data_laed, N_g, N_t, N_T, load_factor, ramp_factor, solver
-        )
-        laed_times_s.append(time.perf_counter() - t0)
+    t0 = time.perf_counter()
+    P_LAED, Shed_LAED, TLMP_LAED, LLMP_LAED, R_LAED, RP_LAED = LAED_No_Errors(
+        data_laed, N_g, N_t, N_T, load_factor, ramp_factor, solver
+    )
 
-        laed_sheds.append(np.sum(Shed_LAED)/12)
-        rp_sheds.append(np.sum(Shed_ED)/12)
+    unique_counts = np.array([len(np.unique(np.round(TLMP_LAED[:, t], 5))) for t in range(N_t)])
+    #print(f"Unique TLMP Counts by Time: {unique_counts}")
+    #print(f"Times Discriminatory: {np.where(unique_counts > 1)[0]}")
+
+    TLMP = np.asarray(TLMP_LAED)
+    #print("LMP Shape:", LLMP_LAED.shape)
+    LMPv = np.asarray(LLMP_LAED)[0,:]
+
+    adj_from_TLMP = TLMP-LMPv
+
+    #print("Max Adjustment:", np.max(np.abs(adj_from_TLMP)))
+    #print("Max spread across gens:", np.max(adj_from_TLMP.max(axis=0) - adj_from_TLMP.min(axis=0)))
+
+
+    # laed_times_s.append(time.perf_counter() - t0)
+
+    # laed_sheds.append(np.sum(Shed_LAED)/12)
+    # rp_sheds.append(np.sum(Shed_ED)/12)
 
     #compare results
 
-    diffs = [laed_sheds[i] - rp_sheds[i] for i in range(40)]
-    print(diffs)
+    # diffs = [laed_sheds[i] - rp_sheds[i] for i in range(40)]
+    # print(diffs)
 
-    fig, ax_shed = plt.subplots(figsize=(9.5, 5.0))
-    ax_time = ax_shed.twinx()
+    # fig, ax_shed = plt.subplots(figsize=(9.5, 5.0))
+    # ax_time = ax_shed.twinx()
 
-    ax_shed.plot(nts, laed_sheds, label="LAED Load Shed", linewidth=2.0)
-    ax_shed.plot(
-        nts,
-        rp_sheds,
-        label="ED+RP Load Shed (10-min + W RP)",
-        linewidth=2.0,
-    )
+    # ax_shed.plot(nts, laed_sheds, label="LAED Load Shed", linewidth=2.0)
+    # ax_shed.plot(
+    #     nts,
+    #     rp_sheds,
+    #     label="ED+RP Load Shed (10-min + W RP)",
+    #     linewidth=2.0,
+    # )
 
-    ax_time.plot(nts, laed_times_s, label="LAED Compute Time", linestyle="--", linewidth=1.8)
-    ax_time.plot(nts, rp_times_s, label="ED+RP Compute Time", linestyle="--", linewidth=1.8)
+    # ax_time.plot(nts, laed_times_s, label="LAED Compute Time", linestyle="--", linewidth=1.8)
+    # ax_time.plot(nts, rp_times_s, label="ED+RP Compute Time", linestyle="--", linewidth=1.8)
 
-    ax_shed.set_xticks(list(range(1, 42, 5)))
-    ax_shed.set_xlabel("Window Size (number of 5-min intervals)")
-    ax_shed.set_ylabel("Load Shed (MW)")
-    ax_time.set_ylabel("Computation time (s)")
+    # ax_shed.set_xticks(list(range(1, 42, 5)))
+    # ax_shed.set_xlabel("Window Size (number of 5-min intervals)")
+    # ax_shed.set_ylabel("Load Shed (MW)")
+    # ax_time.set_ylabel("Computation time (s)")
 
-    handles1, labels1 = ax_shed.get_legend_handles_labels()
-    handles2, labels2 = ax_time.get_legend_handles_labels()
-    ax_shed.legend(handles1 + handles2, labels1 + labels2, loc="center left")
+    # handles1, labels1 = ax_shed.get_legend_handles_labels()
+    # handles2, labels2 = ax_time.get_legend_handles_labels()
+    # ax_shed.legend(handles1 + handles2, labels1 + labels2, loc="center left")
 
-    ax_shed.grid(True, alpha=0.25)
-    fig.suptitle("LAED and RP Comparison: Load Shedding and Computation Time vs Window Length")
-    fig.tight_layout()
-    plt.show()
+    # ax_shed.grid(True, alpha=0.25)
+    # fig.suptitle("LAED and RP Comparison: Load Shedding and Computation Time vs Window Length")
+    # fig.tight_layout()
+    # plt.show()
 
 
 
-    print('Mean Demand:', ref_cap)
-    print('Load Shedding in LAED:', np.sum(Shed_LAED)/12)
-    print('Load Shedding in ED with only', str(5*(data.data()['N_t'][None]-1)), '-min ramp product:', np.sum(Shed_ED)/12)
+    #print('Mean Demand:', ref_cap)
+    #print('Load Shedding in LAED:', np.sum(Shed_LAED)/12)
+    #print('Load Shedding in ED with only', str(5*(data.data()['N_t'][None]-1)), '-min ramp product:', np.sum(Shed_ED)/12)
     
     times_ED = np.linspace(1,len(Shed_ED), len(Shed_ED))
     times_LAED = np.linspace(1, len(Shed_LAED), len(Shed_LAED))
@@ -958,6 +1006,27 @@ if __name__=="__main__":
         laed_tlmp=TLMP_LAED,
         out_path="prices_vs_time.png",
         show=True,
+    )
+
+    # ------------------------------------------------------------------
+    # Volatility metrics over committed time
+    #   - Std dev of the price level
+    #   - Mean absolute intertemporal change (V_MA)
+    # ------------------------------------------------------------------
+    print("\nVolatility metrics over committed time:")
+    for label, series in [
+        ("RP LMP", LMP_ED[0, :]),
+        ("LAED LMP", LLMP_LAED[0, :]),
+    ]:
+        stats = price_volatility_metrics(series)
+        print(f"{label}: std(pi)={stats['std']:.6f}, V_MA={stats['v_ma']:.6f}")
+
+    tlmp_std = np.array([price_std_over_time(TLMP_LAED[g, :]) for g in range(TLMP_LAED.shape[0])], dtype=float)
+    tlmp_vma = np.array([mean_abs_intertemporal_change(TLMP_LAED[g, :]) for g in range(TLMP_LAED.shape[0])], dtype=float)
+    print(
+        "LAED TLMP (per-generator) summary: "
+        f"std(mean/median/max)={np.mean(tlmp_std):.6f}/{np.median(tlmp_std):.6f}/{np.max(tlmp_std):.6f}, "
+        f"V_MA(mean/median/max)={np.mean(tlmp_vma):.6f}/{np.median(tlmp_vma):.6f}/{np.max(tlmp_vma):.6f}"
     )
 
 

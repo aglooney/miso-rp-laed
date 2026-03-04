@@ -1,0 +1,46 @@
+{
+  "seed": 123,
+  "plots": true,
+  "solver": {
+    "name": "gurobi_direct",
+    "options": {
+      "OutputFlag": 0
+    }
+  },
+  "model": {
+    "reserve_factor": 0.0,
+    "cost_load": 3500.0
+  },
+  "time": {
+    "dt_minutes": 5
+  },
+  "lookahead": {
+    "horizons": [13]
+  },
+  "mechanisms": ["lmp", "la", "tlmp"],
+  "systems": {
+    "2gen": {
+      "case_path": "toy_data.dat",
+      "load_source": {
+        "type": "miso_projection",
+        "path": "MISO_Projection.json",
+        "key": "2032_Aug",
+        "ref_cap": 350.0
+      }
+    },
+    "10gen": {
+      "case_path": "10GEN_MASKED.dat",
+      "load_source": {
+        "type": "miso_projection",
+        "path": "MISO_Projection.json",
+        "key": "2032_Aug",
+        "ref_cap": 1100.0
+      }
+    }
+  },
+  "ramp_regimes": {
+    "alphahigh": { "multiplier": { "2gen": 0.8, "10gen": 0.8 } },
+    "alphamed": { "multiplier": { "2gen": 0.3, "10gen": 0.3 } },
+    "alphalow": { "multiplier": { "2gen": 0.182, "10gen": 0.17 } }
+  }
+}
