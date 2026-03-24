@@ -351,6 +351,10 @@ def LMP_calculation(model):
     #mu_rup = model.dual.get(model.rampup_reserve_constraint[t_commit], 0.0)
     #mu_rdw = model.dual.get(model.rampdw_reserve_constraint[t_commit], 0.0)
 
+    # Prices:
+    # - `LMP` is the base energy balance dual (λ).
+    # - `TLMP` is the ramp-adjusted energy price that incorporates the ramping-capability shadow prices
+    #   from the endpoint ramp sufficiency constraints: π = λ - μ_RU + μ_RD.
     # Use abs() to normalize solver sign conventions to positive price magnitudes.
     LMP = abs(lam)
     TLMP = abs(lam) - abs(mu_rup) + abs(mu_rdw)
@@ -546,16 +550,26 @@ def TLMP_calculation(model, N_g, N_t):
     TLMP_T = np.zeros((N_g, N_t))
 
     # Generator-specific TLMP.
-    # User convention: use current minus prior ramping multipliers:
-    #   TLMP_g,t = LMP_t + (Δμ_g,t - Δμ_g,t-1),  where Δμ := μ_up - μ_down
-    
+    # Economic TLMP decomposition (convex case) uses:
+    #
+    #   TLMP_{g,t} = LMP_t - (Δμ_{g,t}) + (Δμ_{g,t+1}),
+    #   where Δμ_{g,t} := μ_up_{g,t} - μ_down_{g,t} and Δμ_{g,T+1} := 0.
+    #
+    # This sign convention is important for the "TLMP implies zero LOC" property.
+
+
     deta = mu_up - mu_down
     for t in range(N_t):
         if t == N_t - 1:
-            deta_prev = 0.0
+            deta_next = 0.0
         else:
-            deta_prev = deta[:, t + 1]
-        TLMP_T[:, t] = LMP[t] + (deta[:, t] - deta_prev)
+            deta_next = deta[:, t + 1]
+        TLMP_T[:, t] = LMP[t] + (deta_next - deta[:, t])
+        
+        #Note: The index shift from previous to current instead of current to next as in Guo et al. 2021,
+        # you have to adjust the signs of the ramp dual variables so that it preserves in intent and
+        #derivation from the KKT conditions
+        #TLMP_T[:, t] = LMP[t] + (deta[:, t] - deta_next)
     return P_value, loadshed_value, TLMP_T, LMP, mu_down, mu_up, R_value, R_price
 
 
@@ -836,7 +850,7 @@ if __name__=="__main__":
     solver.options['OutputFlag'] = 0
     load_factor = 1.0
     reserve_factor = 0
-    ramp_factor = 0.15
+    ramp_factor = 0.1
     cost_load = 3500
     case_name = '10GEN_MASKED.dat'
     data = DataPortal()

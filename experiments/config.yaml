@@ -40,7 +40,7 @@
   },
   "ramp_regimes": {
     "alphahigh": { "multiplier": { "2gen": 0.8, "10gen": 0.8 } },
-    "alphamed": { "multiplier": { "2gen": 0.3, "10gen": 0.3 } },
-    "alphalow": { "multiplier": { "2gen": 0.182, "10gen": 0.17 } }
+    "alphamed": { "multiplier": { "2gen": 0.25, "10gen": 0.25 } },
+    "alphalow": { "multiplier": { "2gen": 0.182, "10gen": 0.1 } }
   }
 }

@@ -130,3 +130,177 @@ Do not change scientific logic of existing solvers unless required to expose out
 - If simulation is notebook-only, extract the key functions into a module and keep notebooks unchanged.
 - If you cannot find TLMP ramp duals, log that TLMP is skipped and still compute LMP/LA metrics.
 
+---
+
+# LOC Metric Implementation (Pyomo + Gurobi, 5-minute intervals)
+
+## Goal
+
+Add computation of **Lost Opportunity Cost (LOC)** for each generator (i) under each price mechanism. Use the following definitions:
+
+### Realized profit under dispatch (g_{i,t})
+
+\[
+\Pi_i^{real}(\pi) = \sum_{t=0}^{T-1}\big(\pi_t, g_{i,t} - f_i(g_{i,t})\big)\Delta t
+\]
+
+### Self-scheduling maximum profit
+
+\[
+Q_i(\pi) = \max_{p_{i,0},\dots,p_{i,T-1}} \sum_{t=0}^{T-1}\big(\pi_t, p_{i,t} - f_i(p_{i,t})\big)\Delta t
+\]
+subject to:
+\[
+0 \le p_{i,t} \le \bar g_i \quad \forall t
+\]
+\[
+-\underline r_i \le p_{i,t+1}-p_{i,t} \le \overline r_i \quad \forall t=0,\dots,T-2
+\]
+
+### Lost opportunity cost
+
+\[
+LOC_i(\pi,g_i)= Q_i(\pi) - \Pi_i^{real}(\pi)
+\]
+
+LOC should be (\ge 0) up to solver tolerance.
+
+---
+
+## Time resolution (CRITICAL)
+
+Markets clear at **5-minute** intervals. Use:
+
+- `dt_hours = 5/60`.
+
+Prices are in $/MWh and dispatch is MW, so multiply all profit terms by `dt_hours` to get dollars.
+
+---
+
+## Which prices and dispatch to use
+
+Compute LOC for these mechanisms:
+
+1. **RP (single-interval / ramp-product)**
+
+- realized dispatch: `g_RP[i,t]`
+- price series: `pi_RP[t] = lambda_RP[t]`
+- profit uses `pi_RP[t]` and `g_RP[i,t]`
+
+2. **LAED-LMP**
+
+- realized dispatch: `g_LA[i,t]` (implemented/settled interval each roll)
+- price series: `pi_LA[t] = lambda_LA[t]` (implemented/settled interval each roll)
+
+3. **TLMP**
+
+- realized dispatch: `g_LA[i,t]`
+- generator-specific price series: `pi_TLMP[i,t]`
+
+  - TLMP is discriminatory; LOC must use each unit’s own TLMP series, not a representative TLMP.
+
+### TLMP boundary handling
+
+If TLMP formula uses (t+1), define `pi_TLMP[i,T-1]` with the (t+1) adjustment set to 0 (or compute it using your existing boundary convention). Ensure the TLMP series length is exactly `T`.
+
+---
+
+## Implement (Q_i(\pi)) as a Pyomo LP (per generator)
+
+Add a helper function:
+
+`compute_Q_i(pi_t: array[T], gen_params: dict, cost_params: dict) -> float`
+
+### Pyomo model for one generator (i)
+
+- Sets:
+  - `T = range(T_len)` for `t=0..T-1`
+- Variables:
+  - `p[t] >= 0`
+- Constraints:
+  - capacity: `p[t] <= Pmax`
+  - ramp up:   `p[t+1] - p[t] <= Rup` for `t=0..T-2`
+  - ramp down: `p[t] - p[t+1] <= Rdn` for `t=0..T-2`
+- Objective (maximize profit):
+  - `sum( (pi[t]*p[t] - cost(p[t])) * dt_hours )`
+
+### Cost function
+
+Match your dispatch cost model:
+
+- If linear: `cost(p) = c * p`
+- If piecewise/quadratic exists, implement the same expression used in the dispatch objective.
+
+This must remain an LP if you want speed; if you add quadratic cost it becomes QP (Gurobi can still solve). Use whatever matches your existing model.
+
+### Solver
+
+Use Gurobi:
+
+- `SolverFactory("gurobi")`
+- Set silent output unless debugging.
+
+Return:
+
+- `Q_i` = `value(model.obj)`
+
+---
+
+## Compute realized profit (\Pi_i^{real}(\pi))
+
+For each generator (i) and mechanism:
+
+- `profit_real = sum( (pi[t]*g[i,t] - cost(g[i,t])) * dt_hours for t )`
+
+Then:
+
+- `LOC_i = Q_i - profit_real`
+
+---
+
+## Outputs
+
+Per scenario, write:
+
+### `loc.csv`
+
+Columns:
+
+- `generator`
+- `Q_rp`, `profit_rp`, `loc_rp`
+- `Q_la`, `profit_la`, `loc_la`
+- `Q_tlmp`, `profit_tlmp`, `loc_tlmp`
+
+Also write scenario totals into `metrics.json` and global `summary_metrics.csv`:
+
+- `loc_total_rp = sum_i loc_rp`
+- `loc_total_la = sum_i loc_la`
+- `loc_total_tlmp = sum_i loc_tlmp`
+- normalized versions per MWh served:
+  - `loc_per_mwh_* = loc_total_* / (sum_t served_load[t]*dt_hours)`
+
+---
+
+## Sanity checks (must implement + log)
+
+1. **Nonnegativity:** if any `loc_* < -1e-6`, log error with generator id and dump:
+   - min/max of `pi`, `g`, `Pmax`, `Rup/Rdn`
+2. **TLMP check:** expect `loc_total_tlmp` near 0 in convex cases. If `loc_total_tlmp > 1e-3`, log warning and dump:
+   - max absolute TLMP adjustment term
+   - count binding ramp constraints
+   - any load-shedding activity
+3. **Alignment:** ensure `len(pi)==T` and `g.shape==(N_g,T)` for each mechanism.
+
+---
+
+## Performance notes
+
+- Solving one LP per generator per mechanism per scenario is OK for N_g=10, T=288.
+- Reuse a single Pyomo model template if possible, updating only objective coefficients `pi[t]` each time (optional optimization).
+- Cache computed `Q_i` if the same `(pi, params)` repeats (unlikely).
+
+---
+
+## Deliverable
+
+Implement LOC computation and export `loc.csv` + summary fields, using 5-minute settlement (`dt_hours=5/60`), Pyomo models, and Gurobi solver.

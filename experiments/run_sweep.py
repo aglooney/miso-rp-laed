@@ -267,6 +267,12 @@ def _run_single_scenario(
                 "mw_per_mwh_rp": None,
                 "mw_per_mwh_la": None,
                 "mw_per_mwh_tlmp": None,
+                "loc_total_rp": None,
+                "loc_total_la": None,
+                "loc_total_tlmp": None,
+                "loc_per_mwh_rp": None,
+                "loc_per_mwh_la": None,
+                "loc_per_mwh_tlmp": None,
             }
             summary_rows: list[dict[str, Any]] = []
             failures: list[dict[str, Any]] = []
@@ -311,14 +317,21 @@ def _run_single_scenario(
 
             if "lmp" in mechanisms:
                 try:
-                    P_ed, _shed, LMP_ed, _TLMP_ed, *_rest = lra.ED_no_errors(
+                    P_ed, _shed, LMP_ed, TLMP_ed, rup_ed, rupp_ed, rdw_ed, rdwp_ed = lra.ED_no_errors(
                         data_ed, n_g, n_t, n_T, 1.0, ramp_multiplier, solver
                     )
                     P_ed_commit = np.asarray(P_ed, dtype=float)
                     shed_ed = np.asarray(_shed, dtype=float).reshape(-1)
-                    lmp_pi = np.asarray(LMP_ed[0, :], dtype=float)
+                    # For RPED, incorporate the ramping capability duals into the energy settlement price.
+                    # (This corresponds to the "TLMP" returned by `lra.ED_no_errors` / `lra.LMP_calculation`.)
+                    lmp_pi = np.asarray(TLMP_ed[0, :], dtype=float)
+                    lambda_lmp = np.asarray(LMP_ed[0, :], dtype=float)
                     columns["pi_lmp_energy"] = lmp_pi
-                    columns["lambda_lmp"] = lmp_pi
+                    columns["lambda_lmp"] = lambda_lmp
+                    columns["pi_lmp_energy_ramp_adder"] = lmp_pi - lambda_lmp
+                    # Also export the ramp product shadow prices (system-level) for diagnostics.
+                    columns["pi_rp_ramp_up"] = np.asarray(rupp_ed[0, :], dtype=float)
+                    columns["pi_rp_ramp_down"] = np.asarray(rdwp_ed[0, :], dtype=float)
                     for g in range(n_g):
                         columns[f"p_ed_g{g+1}"] = np.asarray(P_ed[g, :], dtype=float)
                     _add_series("lmp_energy", lmp_pi)
@@ -414,7 +427,8 @@ def _run_single_scenario(
             # Choose pi_energy for the contract: prefer LMP, then LA, then TLMP-load.
             if lmp_pi is not None:
                 columns["pi_energy"] = lmp_pi
-                columns["lambda"] = lmp_pi
+                # Keep `lambda` as the base energy balance dual when available.
+                columns["lambda"] = columns.get("lambda_lmp", lmp_pi)
                 meta["pi_energy_source"] = "lmp_energy"
                 if P_ed_commit is not None:
                     for g in range(n_g):
@@ -509,7 +523,7 @@ def _run_single_scenario(
                 mw_per_mwh = float(mw_total / demand_mwh) if demand_mwh > 0 else float("nan")
                 return float(mw_total), float(mw_per_mwh)
 
-            # RP (single-interval LMP) make-whole
+            # RP make-whole (RPED energy price includes ramping-dual adjustment)
             if (P_ed_commit is not None) and (lmp_pi is not None):
                 mw_total_rp, mw_per_mwh_rp = _mw_for_price(
                     mechanism="rp",
@@ -586,6 +600,232 @@ def _run_single_scenario(
 
                 write_summary_csv(scenario_dir / "make_whole.csv", mw_rows)
 
+            # ------------------------------------------------------------------
+            # Lost opportunity cost (LOC): self-scheduling profit gap
+            # ------------------------------------------------------------------
+            loc_rows: list[dict[str, Any]] = []
+            loc_tol = 1e-6
+
+            pmax = np.array([float(data.data()["Capacity"][g + 1]) for g in range(n_g)], dtype=float)
+            gen_init = np.array([float(data.data()["Gen_init"][g + 1]) for g in range(n_g)], dtype=float)
+
+            def _self_schedule_optimal_profit(pi_by_gen: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+                """
+                Solve the self-scheduling problem for all generators at once:
+
+                    max_{p[g,t]} sum_{g,t} (pi[g,t] - c[g]) * p[g,t] * dt_hours
+
+                subject to:
+                    0 <= p[g,t] <= Pmax[g]
+                    -R[g] <= p[g,t] - p[g,t-1] <= R[g]   (t>=1)
+                    -R[g] <= p[g,0] - Gen_init[g] <= R[g]
+                """
+                pi_mat = np.asarray(pi_by_gen, dtype=float)
+                if pi_mat.shape != (n_g, n_steps):
+                    raise ValueError(f"pi_by_gen must have shape {(n_g, n_steps)}; got {pi_mat.shape}")
+                if not np.isfinite(pi_mat).all():
+                    raise ValueError("pi_by_gen contains non-finite values (nan/inf).")
+
+                from pyomo.environ import (  # type: ignore
+                    ConcreteModel,
+                    Constraint,
+                    NonNegativeReals,
+                    Objective,
+                    RangeSet,
+                    Var,
+                    maximize,
+                    value,
+                )
+
+                m = ConcreteModel()
+                m.G = RangeSet(0, n_g - 1)
+                m.T = RangeSet(0, n_steps - 1)
+                m.p = Var(m.G, m.T, within=NonNegativeReals)
+
+                def _cap_rule(m, g, t):
+                    return m.p[g, t] <= float(pmax[g])
+
+                m.cap = Constraint(m.G, m.T, rule=_cap_rule)
+
+                if n_steps >= 2:
+                    m.T_ramp = RangeSet(1, n_steps - 1)
+
+                    def _rup_rule(m, g, t):
+                        return m.p[g, t] - m.p[g, t - 1] <= float(ramp_scaled[g])
+
+                    def _rdn_rule(m, g, t):
+                        return m.p[g, t - 1] - m.p[g, t] <= float(ramp_scaled[g])
+
+                    m.rup = Constraint(m.G, m.T_ramp, rule=_rup_rule)
+                    m.rdn = Constraint(m.G, m.T_ramp, rule=_rdn_rule)
+
+                def _rup0_rule(m, g):
+                    return m.p[g, 0] - float(gen_init[g]) <= float(ramp_scaled[g])
+
+                def _rdn0_rule(m, g):
+                    return float(gen_init[g]) - m.p[g, 0] <= float(ramp_scaled[g])
+
+                m.rup0 = Constraint(m.G, rule=_rup0_rule)
+                m.rdn0 = Constraint(m.G, rule=_rdn0_rule)
+
+                def _obj_rule(m):
+                    return float(dt_hours) * sum(
+                        (float(pi_mat[g, t]) - float(cost_coef[g])) * m.p[g, t] for g in m.G for t in m.T
+                    )
+
+                m.obj = Objective(rule=_obj_rule, sense=maximize)
+
+                res = solver.solve(m, tee=False)
+                term = str(res.solver.termination_condition).lower()
+                status = str(res.solver.status).lower()
+                if term != "optimal":
+                    raise RuntimeError(f"LOC self-schedule solve failed: status={status}, term={term}")
+
+                p_opt = np.array([[float(value(m.p[g, t])) for t in m.T] for g in m.G], dtype=float)
+                q_opt = np.sum((pi_mat - cost_coef.reshape(-1, 1)) * p_opt, axis=1) * float(dt_hours)
+                return q_opt, p_opt
+
+            def _realized_profit(
+                *, p_commit: np.ndarray, pi_by_gen: np.ndarray, mechanism: str
+            ) -> np.ndarray:
+                p_arr = np.asarray(p_commit, dtype=float)
+                pi_mat = np.asarray(pi_by_gen, dtype=float)
+                if p_arr.shape != (n_g, n_steps):
+                    raise ValueError(f"dispatch shape mismatch for LOC: got {p_arr.shape}, expected {(n_g, n_steps)}")
+                if pi_mat.shape != (n_g, n_steps):
+                    raise ValueError(f"price shape mismatch for LOC: got {pi_mat.shape}, expected {(n_g, n_steps)}")
+                if np.min(p_arr) < -1e-6:
+                    raise ValueError(f"Negative dispatch detected for LOC under mechanism '{mechanism}'.")
+                return np.sum((pi_mat - cost_coef.reshape(-1, 1)) * p_arr, axis=1) * float(dt_hours)
+
+            # Prepare storage (one row per generator).
+            loc_by_g: dict[str, np.ndarray] = {}
+            q_by_g: dict[str, np.ndarray] = {}
+            profit_by_g: dict[str, np.ndarray] = {}
+
+            # RP LOC: RPED dispatch + RP energy prices (with ramping-dual adjustment)
+            if (P_ed_commit is not None) and (lmp_pi is not None):
+                pi_rp_mat = np.repeat(np.asarray(lmp_pi, dtype=float).reshape(1, -1), n_g, axis=0)
+                q_rp, _p_rp_opt = _self_schedule_optimal_profit(pi_rp_mat)
+                prof_rp = _realized_profit(p_commit=P_ed_commit, pi_by_gen=pi_rp_mat, mechanism="rp")
+                loc_rp = q_rp - prof_rp
+                q_by_g["rp"] = q_rp
+                profit_by_g["rp"] = prof_rp
+                loc_by_g["rp"] = loc_rp
+
+            # LA LOC: LAED dispatch + LA prices
+            if (P_laed_commit is not None) and (la_pi is not None) and ("la" in mechanisms):
+                pi_la_mat = np.repeat(np.asarray(la_pi, dtype=float).reshape(1, -1), n_g, axis=0)
+                q_la, _p_la_opt = _self_schedule_optimal_profit(pi_la_mat)
+                prof_la = _realized_profit(p_commit=P_laed_commit, pi_by_gen=pi_la_mat, mechanism="la")
+                loc_la = q_la - prof_la
+                q_by_g["la"] = q_la
+                profit_by_g["la"] = prof_la
+                loc_by_g["la"] = loc_la
+
+            # TLMP LOC: LAED dispatch + generator-specific TLMP prices
+            if (P_laed_commit is not None) and (tlmp_by_gen_commit is not None) and ("tlmp" in mechanisms):
+                pi_tlmp_mat = np.asarray(tlmp_by_gen_commit, dtype=float)
+                q_tlmp, _p_tlmp_opt = _self_schedule_optimal_profit(pi_tlmp_mat)
+                prof_tlmp = _realized_profit(p_commit=P_laed_commit, pi_by_gen=pi_tlmp_mat, mechanism="tlmp")
+                loc_tlmp = q_tlmp - prof_tlmp
+                q_by_g["tlmp"] = q_tlmp
+                profit_by_g["tlmp"] = prof_tlmp
+                loc_by_g["tlmp"] = loc_tlmp
+
+            if loc_by_g:
+                for mech, loc_vec in loc_by_g.items():
+                    neg = np.where(loc_vec < -loc_tol)[0]
+                    if neg.size:
+                        # Dump a compact set of diagnostics for debugging.
+                        if mech == "rp":
+                            pi_dump = np.asarray(lmp_pi, dtype=float) if lmp_pi is not None else np.array([])
+                            p_dump = np.asarray(P_ed_commit, dtype=float) if P_ed_commit is not None else np.zeros((n_g, n_steps))
+                        elif mech == "la":
+                            pi_dump = np.asarray(la_pi, dtype=float) if la_pi is not None else np.array([])
+                            p_dump = np.asarray(P_laed_commit, dtype=float) if P_laed_commit is not None else np.zeros((n_g, n_steps))
+                        else:
+                            pi_dump = np.asarray(tlmp_by_gen_commit, dtype=float).reshape(-1) if tlmp_by_gen_commit is not None else np.array([])
+                            p_dump = np.asarray(P_laed_commit, dtype=float) if P_laed_commit is not None else np.zeros((n_g, n_steps))
+
+                        for gi in neg.tolist():
+                            logger.error(
+                                f"LOC negative beyond tolerance: mech={mech}, g={gi+1}, loc={loc_vec[gi]:.6g}. "
+                                f"Pmax={pmax[gi]:.6g}, R={ramp_scaled[gi]:.6g}, "
+                                f"pi[min,max]=({float(np.min(pi_dump)) if pi_dump.size else float('nan'):.6g},"
+                                f"{float(np.max(pi_dump)) if pi_dump.size else float('nan'):.6g}), "
+                                f"p[min,max]=({float(np.min(p_dump[gi,:])):.6g},{float(np.max(p_dump[gi,:])):.6g})"
+                            )
+
+                # Export per-generator LOC table (one row per generator with columns per mechanism).
+                for gi in range(n_g):
+                    row: dict[str, Any] = {"generator": int(gi + 1)}
+                    for mech in ("rp", "la", "tlmp"):
+                        qv = q_by_g.get(mech)
+                        pv = profit_by_g.get(mech)
+                        lv = loc_by_g.get(mech)
+                        row[f"Q_{mech}"] = float(qv[gi]) if qv is not None else None
+                        row[f"profit_{mech}"] = float(pv[gi]) if pv is not None else None
+                        row[f"loc_{mech}"] = float(lv[gi]) if lv is not None else None
+                    loc_rows.append(row)
+
+                write_summary_csv(scenario_dir / "loc.csv", loc_rows)
+
+                # Totals + normalized per MWh served.
+                if "rp" in loc_by_g:
+                    loc_total_rp = float(np.sum(np.maximum(0.0, loc_by_g["rp"])))
+                    served_mwh_rp = (
+                        float(np.sum(np.maximum(0.0, demand - shed_ed)) * dt_hours)
+                        if shed_ed is not None
+                        else demand_mwh
+                    )
+                    metrics_out["loc_total_rp"] = loc_total_rp
+                    metrics_out["loc_per_mwh_rp"] = float(loc_total_rp / served_mwh_rp) if served_mwh_rp > 0 else float("nan")
+                if "la" in loc_by_g:
+                    loc_total_la = float(np.sum(np.maximum(0.0, loc_by_g["la"])))
+                    served_mwh_la = (
+                        float(np.sum(np.maximum(0.0, demand - shed_laed)) * dt_hours)
+                        if shed_laed is not None
+                        else demand_mwh
+                    )
+                    metrics_out["loc_total_la"] = loc_total_la
+                    metrics_out["loc_per_mwh_la"] = float(loc_total_la / served_mwh_la) if served_mwh_la > 0 else float("nan")
+                if "tlmp" in loc_by_g:
+                    loc_total_tlmp = float(np.sum(np.maximum(0.0, loc_by_g["tlmp"])))
+                    served_mwh_tlmp = (
+                        float(np.sum(np.maximum(0.0, demand - shed_laed)) * dt_hours)
+                        if shed_laed is not None
+                        else demand_mwh
+                    )
+                    metrics_out["loc_total_tlmp"] = loc_total_tlmp
+                    metrics_out["loc_per_mwh_tlmp"] = (
+                        float(loc_total_tlmp / served_mwh_tlmp) if served_mwh_tlmp > 0 else float("nan")
+                    )
+
+                    # Convex-theory check: TLMP should typically reduce LOC.
+                    if loc_total_tlmp > 1e-3:
+                        shed_frac = float(np.mean(shed_laed > 1e-6)) if shed_laed is not None else float("nan")
+                        logger.warning(
+                            "TLMP LOC is nontrivial: "
+                            f"loc_total_tlmp={loc_total_tlmp:.6g}, "
+                            f"max|TLMP-LA|={float(ramp_diag.get('max_abs_TLMP_adjustment', float('nan'))):.6g}, "
+                            f"binding_ramps={int(ramp_diag.get('count_binding_ramps', 0) or 0)}, "
+                            f"shed_frac={shed_frac:.3%}"
+                        )
+
+                # Attach LOC summary fields to each per-series summary row so they appear in summary_metrics.csv.
+                for r in summary_rows:
+                    for k_loc in (
+                        "loc_total_rp",
+                        "loc_total_la",
+                        "loc_total_tlmp",
+                        "loc_per_mwh_rp",
+                        "loc_per_mwh_la",
+                        "loc_per_mwh_tlmp",
+                    ):
+                        if k_loc in metrics_out:
+                            r[k_loc] = metrics_out[k_loc]
+
             # Write artifacts.
             write_timeseries_csv(scenario_dir / "timeseries.csv", columns)
             write_json(scenario_dir / "metrics.json", metrics_out)
@@ -607,14 +847,15 @@ def _run_single_scenario(
                 x = np.asarray(columns["t"], dtype=int)
                 plt.figure(figsize=(11, 4))
                 to_plot = [
-                    ("LMP energy", "pi_lmp_energy"),
-                    ("LA energy", "pi_la_energy"),
-                    ("TLMP load", "pi_tlmp_load"),
-                    ("TLMP marginal", "pi_tlmp_marginal"),
+                    # Plot solid first, then patterned lines so overlaps remain visible.
+                    ("LMP energy", "pi_lmp_energy", {"color": "C0", "linestyle": "-", "linewidth": 1.1, "alpha": 0.95}),
+                    ("LA energy", "pi_la_energy", {"color": "C1", "linestyle": "--", "linewidth": 1.1, "alpha": 0.95}),
+                    ("TLMP load", "pi_tlmp_load", {"color": "C2", "linestyle": ":", "linewidth": 1.3, "alpha": 0.95}),
+                    ("TLMP marginal", "pi_tlmp_marginal", {"color": "C3", "linestyle": "-.", "linewidth": 1.1, "alpha": 0.95}),
                 ]
-                for label, key in to_plot:
+                for label, key, style in to_plot:
                     if key in columns:
-                        plt.plot(x, np.asarray(columns[key], dtype=float), label=label, linewidth=1.8)
+                        plt.plot(x, np.asarray(columns[key], dtype=float), label=label, **style)
                 plt.xlabel("Time (5-min intervals)")
                 plt.ylabel("Price ($/MWh)")
                 n_g_title = int(meta.get("N_g", 0))

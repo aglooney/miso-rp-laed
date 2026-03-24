@@ -40,6 +40,7 @@ Per-scenario files:
 - `timeseries.csv` (at minimum: `t`, `demand`, `pi_energy`)
 - `metrics.json` (volatility metrics for the available series)
 - `make_whole.csv` (make-whole payments by generator and mechanism)
+- `loc.csv` (lost opportunity cost by generator and mechanism)
 - `ramp_diagnostics.json` (load ramp vs ramp-limit diagnostics + TLMP activity)
 - `log.txt` (full scenario logs)
 - `FAILED.txt` (only if the scenario errors; sweep continues)
@@ -56,3 +57,5 @@ The `--no-run-subdir` flag restores the legacy layout that writes directly to `<
 - `experiments/config.yaml` is **JSON-compatible YAML** so it can be parsed without extra dependencies. If you prefer full YAML syntax, install `pyyaml` and the runner will use it automatically.
 - `ramp_regimes.*.multiplier` can be a single float (applies to all systems) or a mapping like `{ "2gen": 0.15, "10gen": 0.3 }`.
 - Make-whole uses linear costs: `MW_i = max(0, sum_t (c_i p_{i,t} - pi_t p_{i,t}) * dt_hours)`. TLMP settles each generator at its own TLMP.
+- LOC uses a self-scheduling LP for each generator with capacity + ramp constraints and `dt_hours` (5-min settlement by default).
+- RP (`lmp`) settles energy at the ramp-adjusted RPED price `pi = λ - μ_RU + μ_RD` (exported as `pi_lmp_energy`), and also exports the base balance dual as `lambda_lmp`.
